@@ -5,11 +5,16 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	//"training.pl/go/common"
+	// . "training.pl/go/common" // import bez prefiksu/namespace
+	// c "training.pl/go/common" // import z aliasowaniem
+	// _ "training.pl/go/common" // ignorowanie błędu kompilacji (przydatne kiedy chcemy załadować moduł, który np. wykonuje jakiś kod)
 )
 
 func main() {
+
 	fmt.Printf("Hello World\n")
-	collections()
+	structs()
 }
 
 const CurrentYear = 5
@@ -520,7 +525,7 @@ func (p *path) show() {
 	fmt.Println(*p)
 }
 
-type systemPath path
+type systemPath = path
 
 type person struct {
 	firstName string
@@ -676,7 +681,7 @@ func enums() {
 type responseStatus = int
 
 const (
-	ok = iota
+	ok = 100 + iota
 	noContent
 	notFound
 )
