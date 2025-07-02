@@ -9,3 +9,8 @@
    Gracze na zmianę zajmują wolne pola, umieszczając na nich swój znak (kółko lub krzyżyk).
    Gra kończy się, gdy wszystkie pola zostaną zajęte lub jeden z graczy zajmie zwycięską sekwencję (kolumnę, rząd lub przekątną).
    Interfejs gry powinien opierać się na wierszu poleceń/terminalu.
+
+4. Napisz aplikację do rejestrowania wpływów/wydatków na potrzeby budżetu domowego.
+   Aplikacja powinna rejestrować kwotę, rodzaj operacji, timestamp i jej opis (podane jako argumenty wiersza poleceń)
+   oraz generować raport/tabelę w terminalu. Raport powinien zawierać wszystkie operacje i podsumowanie/saldo końcowe.
+   Aplikacja powinna zapisywać dane wprowadzone przez użytkownika w pliku tekstowym (json).
