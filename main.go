@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
-	"training.pl/go/concurrency"
+	"training.pl/go/examples"
 	//"training.pl/go/common"
 	// . "training.pl/go/common" // import bez prefiksu/namespace
 	// c "training.pl/go/common" // import z aliasowaniem
@@ -13,8 +13,6 @@ import (
 )
 
 func main() {
-	concurrency.Run()
-
 	// fmt.Printf("Hello World\n")
 
 	//budget := &b.Budget{}
@@ -48,6 +46,8 @@ func main() {
 	// defer func() {
 	// 	fmt.Println("Other close")
 	// }()
+
+	examples.Cat()
 
 }
 
