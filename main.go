@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	b "training.pl/go/examples/budget"
 	//"training.pl/go/common"
 	// . "training.pl/go/common" // import bez prefiksu/namespace
 	// c "training.pl/go/common" // import z aliasowaniem
@@ -12,9 +13,14 @@ import (
 )
 
 func main() {
+	// fmt.Printf("Hello World\n")
 
-	fmt.Printf("Hello World\n")
-	structs()
+	budget := &b.Budget{}
+	budget = budget.Load()
+	budget.EntryFromArgs()
+	budget.Save()
+	budget.Print()
+
 }
 
 const CurrentYear = 5
