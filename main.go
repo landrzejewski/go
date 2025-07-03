@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"slices"
 	"training.pl/go/examples"
+	"training.pl/go/examples/chat"
 	//"training.pl/go/common"
 	// . "training.pl/go/common" // import bez prefiksu/namespace
 	// c "training.pl/go/common" // import z aliasowaniem
@@ -13,6 +14,10 @@ import (
 )
 
 func main() {
+
+	//	chat.Server("localhost:8000")
+	chat.Client("localhost:8000")
+
 	// fmt.Printf("Hello World\n")
 
 	//budget := &b.Budget{}
