@@ -9,19 +9,19 @@ import (
 
 var storage = common.Stack[int]{}
 var mutex = sync.Mutex{}
-var storageIsFull = sync.NewCond(&mutex)
-var storageIsEmpty = sync.NewCond(&mutex)
+var producerCond = sync.NewCond(&mutex)
+var consumerCond = sync.NewCond(&mutex)
 
 func producer(wg *sync.WaitGroup) {
 	for range 100 {
 		mutex.Lock()
 		for storage.Size() >= 10 {
 			fmt.Println("Producer waiting - storage is full")
-			storageIsFull.Wait()
+			producerCond.Wait()
 		}
 		fmt.Println("Producing")
 		storage.Push(0)
-		storageIsEmpty.Broadcast()
+		consumerCond.Broadcast()
 		mutex.Unlock()
 	}
 	wg.Done()
@@ -32,11 +32,11 @@ func consumer(wg *sync.WaitGroup) {
 		mutex.Lock()
 		for storage.Size() == 0 {
 			fmt.Println("Consumer waiting - storage is empty")
-			storageIsEmpty.Wait()
+			consumerCond.Wait()
 		}
 		fmt.Println("Consuming")
 		storage.Pop()
-		storageIsFull.Broadcast()
+		producerCond.Broadcast()
 		mutex.Unlock()
 	}
 	wg.Done()
