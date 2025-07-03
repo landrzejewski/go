@@ -1,7 +1,6 @@
 package concurrency
 
-/*
-func Run() {
+/*func Run() {
 	go printText("Hello")
 	fmt.Println("Before sleep")
 	time.Sleep(5 * time.Second)
@@ -12,8 +11,7 @@ func printText(text string) {
 }
 */
 
-/*
-// WaitGroup
+/*// WaitGroup
 func Run() {
 	wg := sync.WaitGroup{}
 	letters := []string{"a", "b", "c", "d", "e", "f", "g"}
@@ -26,10 +24,9 @@ func Run() {
 }
 
 func printText(text string, wg *sync.WaitGroup) {
+	defer wg.Done()
 	fmt.Println(text)
-	wg.Done()
-}
-*/
+}*/
 
 /*
 // Mutex
@@ -52,8 +49,7 @@ func increment(wg *sync.WaitGroup, mutex *sync.Mutex) {
 	defer mutex.Unlock()
 	mutex.Lock()
 	counter += 1
-}
-*/
+}*/
 
 /*
 // RWMutex
@@ -97,11 +93,9 @@ func Run() {
 	}()
 
 	time.Sleep(3 * time.Second)
-}
-*/
+}*/
 
-/*
-// Mutex + Signals
+/*// Mutex + Signals
 var (
 	money                 = 100
 	mutex                 = sync.Mutex{}
@@ -142,11 +136,9 @@ func Run() {
 
 	time.Sleep(10 * time.Second)
 	fmt.Println("Current value:", money)
-}
-*/
+}*/
 
-/*
-// Deadlocks
+/*// Deadlocks
 var (
 	lock1 = sync.Mutex{}
 	lock2 = sync.Mutex{}
@@ -185,7 +177,6 @@ func Run() {
 	fmt.Println("Done")
 }
 */
-
 // https://dev.to/ietxaniz/go-deadlock-detection-delock-library-1eig
 
 /*
@@ -222,14 +213,14 @@ func Run() {
 }
 */
 
-/*
-// Cyclic barrier
+/*// Cyclic barrier
 func execute(name string, sleepTime int, barrier *Barrier) {
 	for {
 		println(name, "running")
 		time.Sleep(time.Duration(sleepTime) * time.Second)
 		println(name, "is waiting on barrier")
 		barrier.Wait()
+		println(name, "is after barrier")
 	}
 }
 
@@ -239,8 +230,7 @@ func Run() {
 	go execute("Two", 10, barrier)
 	go execute("Three", 6, barrier)
 	time.Sleep(100 * time.Second)
-}
-*/
+}*/
 
 /*
 // Semaphore

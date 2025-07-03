@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
-	b "training.pl/go/examples/budget"
+	"training.pl/go/concurrency"
 	//"training.pl/go/common"
 	// . "training.pl/go/common" // import bez prefiksu/namespace
 	// c "training.pl/go/common" // import z aliasowaniem
@@ -13,13 +13,41 @@ import (
 )
 
 func main() {
+	concurrency.Run()
+
 	// fmt.Printf("Hello World\n")
 
-	budget := &b.Budget{}
-	budget = budget.Load()
-	budget.EntryFromArgs()
-	budget.Save()
-	budget.Print()
+	//budget := &b.Budget{}
+	//budget = budget.Load()
+	//budget.EntryFromArgs()
+	//budget.Save()
+	//budget.Print()
+
+	// var stack = &common.Stack[int]{}
+	// stack.Push(1)
+	// stack.Push(2)
+	// fmt.Println(stack.Pop())
+	// fmt.Println(stack.Pop())
+	// fmt.Println(stack.Pop())
+
+	// var stack = &common.Stack[bool]{}
+	// stack.Push(true)
+	// stack.Push(false)
+	// fmt.Println(stack.Pop())
+	// fmt.Println(stack.Pop())
+	// fmt.Println(stack.Pop())
+
+	// var stack = common.NewStack()
+	// stack.Push(1)
+	// stack.Push(2)
+	// fmt.Println(stack.Pop())
+	// fmt.Println(stack.Pop())
+	// fmt.Println(stack.Pop())
+
+	// defer close()
+	// defer func() {
+	// 	fmt.Println("Other close")
+	// }()
 
 }
 
