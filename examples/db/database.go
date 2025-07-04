@@ -1,6 +1,8 @@
 package db
 
 import (
+	"fmt"
+	"io"
 	"log"
 	"os"
 	"sync"
@@ -64,6 +66,38 @@ func (d *Database) saveState() error {
 		return err
 	}
 	return os.WriteFile(d.file.Name()+stateFileSuffix, bytes, 0644)
+}
+
+func (d *Database) Create(object any) (*Record, error) {
+	bytes, err := common.ToBytes(object)
+	if err != nil {
+		return nil, err
+	}
+	d.lock.Lock()
+	defer d.lock.Unlock()
+	offset, err := d.endOffset()
+	if err != nil {
+		return nil, err
+	}
+	id := d.idGenerator.next()
+	_, exit := d.state.Records[id]
+	if exit {
+		return nil, fmt.Errorf("record with id %d already exists", id)
+	}
+	length, err := d.file.WriteAt(bytes, offset)
+	if err != nil {
+		return nil, err
+	}
+	record := &Record{id, offset, int64(length)}
+	d.state.Records[id] = record
+	if err := d.saveState(); err != nil {
+		return nil, err
+	}
+	return record, nil
+}
+
+func (d *Database) endOffset() (int64, error) {
+	return d.file.Seek(0, io.SeekEnd)
 }
 
 func DatabaseTest() {
