@@ -15,7 +15,7 @@ Content-Type: application/json
 
 ###
 
-GET http://localhost:8080/users/4
+GET http://localhost:8080/users/2
 Accept: application/json
 Content-Type: application/json
 
@@ -32,7 +32,7 @@ Content-Type: application/json
 
 ###
 
-DELETE http://localhost:8080/users/4
+DELETE http://localhost:8080/users/1
 Accept: application/json
 Content-Type: application/json
 
