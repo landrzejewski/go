@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
-	"training.pl/go/examples"
+	"training.pl/go/examples/db"
 	//"training.pl/go/common"
 	// . "training.pl/go/common" // import bez prefiksu/namespace
 	// c "training.pl/go/common" // import z aliasowaniem
@@ -15,7 +15,9 @@ import (
 func main() {
 	// db.DatabaseTest()
 
-	examples.RestApi()
+	//examples.RestApi()
+
+	db.DatabaseExercise()
 
 	// chat.Server("localhost:8000")
 	// chat.Client("localhost:8000")

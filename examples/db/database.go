@@ -2,9 +2,12 @@ package db
 
 import (
 	"fmt"
+	"github.com/gin-gonic/gin"
 	"io"
 	"log"
+	"net/http"
 	"os"
+	"strconv"
 	"training.pl/go/common"
 )
 
@@ -227,6 +230,98 @@ type User struct {
 	LastName  string
 	Age       int16
 	IsActive  bool
+}
+
+func DatabaseExercise() {
+	db := Db("users.db", &Sequence{})
+	defer db.Close()
+	go db.run()
+
+	router := gin.Default()
+	router.Use(func(c *gin.Context) {
+		c.Set("db", db)
+	})
+
+	router.POST("/users", createUser)
+	router.GET("/users/:id", getUser)
+	router.PUT("/users/:id", updateUser)
+	router.DELETE("/users/:id", deleteUser)
+
+	router.Run(":8080")
+}
+
+func getDb(c *gin.Context) *Database {
+	db, _ := c.Get("db")
+	return db.(*Database)
+}
+
+type CreateUserResponse struct {
+	Id int64
+}
+
+func createUser(c *gin.Context) {
+	var user User
+	err := c.Bind(&user)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{})
+		return
+	}
+	result := getDb(c).Create(user)
+	if result.Error != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{})
+		return
+	}
+	c.Header("Location", fmt.Sprintf("/api/users/%d", result.Record.Id))
+	c.JSON(http.StatusCreated, &CreateUserResponse{result.Record.Id})
+}
+
+func getUser(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{})
+		return
+	}
+	user := User{}
+	result := getDb(c).Read(id, &user)
+	if result.Error != nil {
+		c.JSON(http.StatusNotFound, gin.H{})
+		return
+	}
+	c.JSON(http.StatusOK, &user)
+}
+
+func updateUser(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{})
+		return
+	}
+	var user User
+	err = c.Bind(&user)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{})
+		return
+	}
+	result := getDb(c).Update(id, &user)
+	if result.Error != nil {
+		c.JSON(http.StatusNotFound, gin.H{})
+		return
+	}
+	c.Status(http.StatusNoContent)
+}
+
+func deleteUser(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{})
+		return
+	}
+	result := getDb(c).Delete(id)
+	if result.Error != nil {
+		c.JSON(http.StatusNotFound, gin.H{})
+		return
+	}
+	c.Status(http.StatusNoContent)
 }
 
 /*const stateFileSuffix = ".state"

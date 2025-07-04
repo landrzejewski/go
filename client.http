@@ -63,7 +63,7 @@ Content-Type: application/json
 {
   "firstName": "Marek",
   "lastName": "Nowak",
-  "isActive": true
+  "isActive": false
 }
 
 ###
