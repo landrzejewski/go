@@ -30,7 +30,7 @@ type DatabaseState struct {
 }
 
 func Db(filepath string, idGenerator IdGenerator) *Database {
-	file, err := os.OpenFile(filepath, os.O_CREATE, 0666)
+	file, err := os.OpenFile(filepath, os.O_CREATE|os.O_RDWR, 0644)
 	catchFatal(err, "Failed to open database")
 	var state DatabaseState
 	bytes, err := os.ReadFile(filepath + stateFileSuffix)
@@ -96,8 +96,61 @@ func (d *Database) Create(object any) (*Record, error) {
 	return record, nil
 }
 
-func (d *Database) ReadById(id int64) (*Record, error) {
+func (d *Database) Read(id int64, object any) (*Record, error) {
+	d.lock.Lock()
+	defer d.lock.Unlock()
+	record, exists := d.state.Records[id]
+	if !exists {
+		return nil, fmt.Errorf("record with id %d not found", id)
+	}
+	bytes := make([]byte, record.Length)
+	_, err := d.file.ReadAt(bytes, record.Offset)
+	if err != nil {
+		return nil, err
+	}
+	err = common.FromBytes(bytes, object)
+	if err != nil {
+		return nil, err
+	}
+	return record, nil
+}
 
+func (d *Database) Delete(id int64) error {
+	d.lock.Lock()
+	defer d.lock.Unlock()
+	_, exists := d.state.Records[id]
+	if !exists {
+		return fmt.Errorf("record with id %d not found", id)
+	}
+	delete(d.state.Records, id)
+	if err := d.saveState(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (d *Database) Update(id int64, object any) (*Record, error) {
+	bytes, err := common.ToBytes(object)
+	if err != nil {
+		return nil, err
+	}
+	d.lock.Lock()
+	defer d.lock.Unlock()
+	record, exists := d.state.Records[id]
+	if !exists {
+		return nil, fmt.Errorf("record with id %d not found", id)
+	}
+	offset, err := d.endOffset()
+	if err != nil {
+		return nil, err
+	}
+	length, err := d.file.WriteAt(bytes, offset)
+	if err != nil {
+		return nil, err
+	}
+	record.Offset = offset
+	record.Length = int64(length)
+	return record, nil
 }
 
 func (d *Database) endOffset() (int64, error) {
@@ -106,5 +159,27 @@ func (d *Database) endOffset() (int64, error) {
 
 func DatabaseTest() {
 	db := Db("users.db", &Sequence{})
-	db.Close()
+	defer db.Close()
+
+	user := User{"Jan", "Kowalski", 25, true}
+	record, err := db.Create(&user)
+	fmt.Println(record, err)
+
+	user.IsActive = false
+	record, err = db.Update(record.Id, &user)
+	fmt.Println(record, err)
+
+	loadedUser := &User{}
+	record, err = db.Read(record.Id, loadedUser)
+	fmt.Println(loadedUser, record, err)
+
+	err = db.Delete(record.Id)
+	fmt.Println(err)
+}
+
+type User struct {
+	FirstName string
+	LastName  string
+	Age       int16
+	IsActive  bool
 }
