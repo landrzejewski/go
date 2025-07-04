@@ -5,8 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
-	"training.pl/go/examples"
-	"training.pl/go/examples/chat"
+	"training.pl/go/examples/db"
 	//"training.pl/go/common"
 	// . "training.pl/go/common" // import bez prefiksu/namespace
 	// c "training.pl/go/common" // import z aliasowaniem
@@ -14,9 +13,9 @@ import (
 )
 
 func main() {
-
-	//	chat.Server("localhost:8000")
-	chat.Client("localhost:8000")
+	db.DatabaseTest()
+	// chat.Server("localhost:8000")
+	// chat.Client("localhost:8000")
 
 	// fmt.Printf("Hello World\n")
 
@@ -52,7 +51,7 @@ func main() {
 	// 	fmt.Println("Other close")
 	// }()
 
-	examples.Cat()
+	// examples.Cat()
 
 }
 
