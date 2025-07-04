@@ -96,6 +96,10 @@ func (d *Database) Create(object any) (*Record, error) {
 	return record, nil
 }
 
+func (d *Database) ReadById(id int64) (*Record, error) {
+
+}
+
 func (d *Database) endOffset() (int64, error) {
 	return d.file.Seek(0, io.SeekEnd)
 }
