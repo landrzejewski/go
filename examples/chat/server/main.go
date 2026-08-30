@@ -13,7 +13,7 @@ import (
 	"syscall"
 	"time"
 
-	"tcp-chat/common"
+	"training.pl/go/examples/chat/common"
 )
 
 // Server represents the chat server
@@ -68,7 +68,7 @@ func (s *Server) Start(port string) error {
 			}
 		}
 
-		// Sprawdzenie limitu i rejestracja połączenia w jednej, atomowej operacji.
+		// Limit check and connection registration in one atomic operation.
 		if err := s.rateLimiter.TryAddConnection(conn.RemoteAddr()); err != nil {
 			common.Warn("Connection rejected from %s: %v", conn.RemoteAddr(), err)
 			conn.Close()
@@ -81,14 +81,15 @@ func (s *Server) Start(port string) error {
 
 // handleNewConnection handles a new client connection
 func (s *Server) handleNewConnection(conn net.Conn) {
-	// Slot połączenia zajęto już w pętli accept (TryAddConnection), więc tutaj
-	// wystarczy zagwarantować jego zwolnienie - BEZWARUNKOWO, także gdy klient
-	// rozłączy się przed rejestracją nicku.
+	// The connection slot was already claimed in the accept loop
+	// (TryAddConnection), so all that is needed here is to guarantee its release -
+	// UNCONDITIONALLY, including when the client disconnects before registering a
+	// nickname.
 	//
-	// Wcześniej zwolnienie działo się dopiero w UnregisterClient, PO wczesnym
-	// return dla pustego nicku - więc każdy skan portów i każdy odrzucony
-	// klient zabierał slot na stałe. Po MaxConnections takich połączeń serwer
-	// odmawiał już wszystkim.
+	// Previously the release happened only in UnregisterClient, AFTER the early
+	// return for an empty nickname - so every port scan and every rejected client
+	// took a slot permanently. After MaxConnections such connections the server
+	// refused everyone.
 	defer s.rateLimiter.RemoveConnection(conn.RemoteAddr())
 
 	// Set initial read/write deadlines
@@ -99,8 +100,8 @@ func (s *Server) handleNewConnection(conn net.Conn) {
 	client.RemoteAddr = conn.RemoteAddr().String()
 	common.Info("New connection from %s", conn.RemoteAddr())
 
-	// Start blokuje aż do zakończenia obu pomp, żeby defer powyżej wykonał się
-	// dokładnie wtedy, gdy połączenie faktycznie się kończy.
+	// Start blocks until both pumps finish, so the defer above runs exactly when
+	// the connection really ends.
 	client.Start()
 }
 
@@ -120,7 +121,7 @@ func (s *Server) RegisterClient(client *Client, nickname string) (bool, error) {
 		return false, fmt.Errorf("nickname '%s' is already taken", nickname)
 	}
 
-	// Nickname jest czytane przez goroutines innych klientów - tylko przez setter.
+	// Nickname is read by other clients' goroutines - go through the setter only.
 	client.SetNickname(nickname)
 	s.clients.Store(nickname, client)
 
@@ -141,9 +142,9 @@ func (s *Server) RegisterClient(client *Client, nickname string) (bool, error) {
 
 // UnregisterClient removes a client from the server
 func (s *Server) UnregisterClient(client *Client) {
-	// Slot połączenia zwalnia teraz defer w handleNewConnection - bezwarunkowo
-	// i dla każdego gniazda, także takiego, które nigdy się nie zarejestrowało.
-	// Tutaj sprzątamy wyłącznie stan związany z NICKIEM.
+	// The connection slot is now released by the defer in handleNewConnection -
+	// unconditionally and for every socket, including one that never registered.
+	// Here we clean up only the state tied to the NICKNAME.
 	nickname := client.GetNickname()
 	if nickname == "" {
 		return
@@ -184,7 +185,7 @@ func (s *Server) GetClient(nickname string) (*Client, bool) {
 
 // BroadcastMessage sends a message to all connected clients
 func (s *Server) BroadcastMessage(msg *common.Message, exclude string) {
-	s.clients.Range(func(key, value interface{}) bool {
+	s.clients.Range(func(key, value any) bool {
 		client := value.(*Client)
 
 		nickname := client.GetNickname()
@@ -208,7 +209,7 @@ func (s *Server) BroadcastMessage(msg *common.Message, exclude string) {
 func (s *Server) BroadcastUserList() {
 	var users []string
 
-	s.clients.Range(func(key, value interface{}) bool {
+	s.clients.Range(func(key, value any) bool {
 		client := value.(*Client)
 		// Don't include invisible users in the list
 		if client.GetStatus() != common.StatusInvisible {
@@ -230,18 +231,19 @@ func (s *Server) HandleMessage(client *Client, msg *common.Message) error {
 	nickname := client.GetNickname()
 	common.Debug("Handling %s message from %s", msg.Type, nickname)
 
-	// Wszystko poza CONNECT wymaga rejestracji. Bez tego anonimowy klient mógł
-	// rozgłaszać wiadomości, tworzyć pokoje i uruchamiać transfery plików,
-	// a wszystkie mapy limitów kluczowały się pustym nickiem, więc niezalogowani
-	// dzielili jeden wspólny kubełek.
+	// Everything except CONNECT requires registration. Without this an anonymous
+	// client could broadcast messages, create rooms and start file transfers - and
+	// every rate-limit map was keyed by the empty nickname, so all unregistered
+	// clients shared a single bucket.
 	if msg.Type != common.TypeConnect && nickname == "" {
 		return common.NewChatError(common.ErrUnauthorized, "you must register with CONNECT first")
 	}
 
 	switch msg.Type {
 	case common.TypeConnect:
-		// Ponowny CONNECT po udanej rejestracji zostawiałby stary nick w mapie
-		// klientów wskazujący na to samo połączenie - "duch" na liście użytkowników.
+		// A second CONNECT after a successful registration would leave the old
+		// nickname in the client map pointing at the same connection - a "ghost" on
+		// the user list.
 		if nickname != "" {
 			return common.NewChatError(common.ErrValidation, "already registered")
 		}
@@ -254,10 +256,9 @@ func (s *Server) HandleMessage(client *Client, msg *common.Message) error {
 			errMsg := common.NewErrorMessage("Server", msg.Sender, err.Error())
 			client.SendMessage(errMsg)
 
-			// Wiadomość jest tylko KOLEJKOWANA, więc natychmiastowe Conn.Close()
-			// prawie zawsze ucinało ją przed wysłaniem i odrzucony użytkownik
-			// widział gołe rozłączenie bez powodu. Dajemy WritePump chwilę na
-			// opróżnienie kolejki.
+			// The message is only QUEUED, so an immediate Conn.Close() almost
+			// always cut it off before it was sent and the rejected user saw a bare
+			// disconnect with no reason. Give WritePump a moment to drain the queue.
 			go func() {
 				time.Sleep(100 * time.Millisecond)
 				client.Close()
@@ -282,12 +283,12 @@ func (s *Server) HandleMessage(client *Client, msg *common.Message) error {
 
 		// Handle text messages.
 		//
-		// KOLEJNOŚĆ MA ZNACZENIE: test na Room musi być PIERWSZY. Klient
-		// (Connection.SendRoomMessage) ustawia tylko pole Room i zostawia
-		// Recipient puste, więc przy poprzedniej kolejności każda wiadomość
-		// pokojowa wpadała w gałąź `Recipient == ""` i była rozgłaszana do
-		// WSZYSTKICH zalogowanych - a sprawdzenie członkostwa poniżej było
-		// martwym kodem. Prywatne pokoje nie były więc w ogóle prywatne.
+		// ORDER MATTERS: the Room test must come FIRST. The client
+		// (Connection.SendRoomMessage) sets only the Room field and
+		// leaves Recipient empty, so with the previous ordering every room message
+		// fell into the `Recipient == ""` branch and was broadcast to EVERY
+		// registered user - and the membership check below was dead code. Private
+		// rooms were therefore not private at all.
 		if msg.Room != "" {
 			// Room message - validate sender is a member
 			if room, exists := s.roomManager.GetRoom(msg.Room); exists {
@@ -341,13 +342,14 @@ func (s *Server) HandleMessage(client *Client, msg *common.Message) error {
 		s.handleFileChunk(client, msg)
 
 	case common.TypeAck:
-		// Keep-alive od klienta. Nie wymaga odpowiedzi - samo dotarcie
-		// wiadomości odświeżyło już read deadline w ReadPump. Bez tej gałęzi
-		// keep-alive wpadał w default i wracał jako błąd "unknown message type".
+		// A keep-alive from the client. No reply is needed - merely
+		// receiving the message has already refreshed the read deadline in
+		// ReadPump. Without this branch a keep-alive fell into default and came
+		// back as an "unknown message type" error.
 
 	case common.TypeDisconnect:
-		// Klient wysyła to przy Ctrl-C (client/main.go). Bez tej gałęzi wpadało
-		// w default i odbijało się błędem "unknown message type: DISCONNECT".
+		// The client sends this on Ctrl-C (client/main.go). Without this branch it
+		// fell into default and bounced back as "unknown message type: DISCONNECT".
 		common.Info("Client %s requested disconnect", nickname)
 		s.UnregisterClient(client)
 		client.Close()
@@ -393,10 +395,10 @@ func (s *Server) handleRoomMessage(client *Client, msg *common.Message) {
 
 	case common.RoomJoin:
 		if room, exists := s.roomManager.GetRoom(msg.Room); exists {
-			// Dołączyć może twórca albo osoba zaproszona. Wcześniej ta gałąź
-			// nie sprawdzała NICZEGO, więc znajomość identyfikatora pokoju
-			// wystarczyła, by wejść do cudzego "prywatnego" pokoju - podczas
-			// gdy handleInviteResponse starannie weryfikuje IsInvited.
+			// Only the creator or an invited user may join. This branch used to
+			// check NOTHING, so knowing a room id was enough to walk into someone
+			// else's "private" room - while handleInviteResponse right below
+			// carefully verifies IsInvited.
 			if room.Creator != nickname && !room.IsInvited(nickname) {
 				errMsg := common.NewErrorMessage("Server", nickname, "You have not been invited to this room")
 				client.SendMessage(errMsg)
@@ -569,10 +571,10 @@ func (s *Server) handleRoomMessage(client *Client, msg *common.Message) {
 			}
 
 			// Remove the room
-			// Zwalniamy limit pokoi twórcy - RateLimiter.RemoveRoom nie było
-			// wołane znikąd, więc licznik roomsPerUser tylko rósł i po
-			// MaxRoomsPerUser użytkownik nie mógł już utworzyć pokoju,
-			// nawet po skasowaniu wszystkich swoich.
+			// Release the creator's room quota - RateLimiter.RemoveRoom was never
+			// called from anywhere, so the roomsPerUser counter only grew and after
+			// MaxRoomsPerUser the user could no longer create a room, even after
+			// deleting every room they owned.
 			s.rateLimiter.RemoveRoom(room.Creator)
 			s.roomManager.RemoveRoom(msg.Room)
 
@@ -749,18 +751,18 @@ func (s *Server) handleFileChunk(client *Client, msg *common.Message) {
 
 	ft := value.(*common.FileTransfer)
 
-	// Tylko nadawca transferu może dosyłać jego fragmenty. Bez tego dowolny
-	// zalogowany klient, który zna FileID, mógł wstrzykiwać dane w cudzy transfer.
+	// Only the transfer's sender may push its chunks. Without this any registered
+	// client who knew a FileID could inject data into someone else's transfer.
 	if client.GetNickname() != ft.Sender {
 		errMsg := common.NewErrorMessage("Server", client.GetNickname(), "You are not the sender of this transfer")
 		client.SendMessage(errMsg)
 		return
 	}
 
-	// Serwer tylko PRZEKAZUJE fragmenty - nie musi trzymać zawartości pliku.
-	// Wcześniejsze ft.AddChunk(msg.ChunkNum, msg.Data) buforowało w pamięci
-	// serwera całe pliki (do MaxFileSize na transfer), choć nikt tych bajtów
-	// nie odczytywał. Do wykrycia końca wystarczy licznik fragmentów.
+	// The server only RELAYS chunks - it need not hold the file contents. The
+	// earlier ft.AddChunk(msg.ChunkNum, msg.Data) buffered whole files in server
+	// memory (up to MaxFileSize per transfer) even though nobody read those bytes.
+	// A chunk counter is enough to detect the end.
 	ft.MarkChunkReceived(msg.ChunkNum)
 
 	// Forward to recipient
@@ -777,9 +779,9 @@ func (s *Server) handleFileChunk(client *Client, msg *common.Message) {
 			recipient.SendMessage(completeMsg)
 			client.SendMessage(completeMsg)
 
-			// Clean up. Zwolnienie limitu było wołane WYŁĄCZNIE ze ścieżki
-			// timeoutu (cleanup.go), więc po FileTransfersPerUser UDANYCH
-			// transferach użytkownik nie mógł już wysłać nic więcej.
+			// Clean up. The quota release used to be called ONLY from the timeout
+			// path (cleanup.go), so after FileTransfersPerUser SUCCESSFUL transfers
+			// the user could not send anything more.
 			s.fileTransfers.Delete(msg.FileID)
 			s.rateLimiter.RemoveFileTransfer(ft.Sender)
 		}
@@ -808,7 +810,7 @@ func (s *Server) handleShutdown() {
 	// Close all client connections
 	connClosed := make(chan bool)
 	go func() {
-		s.clients.Range(func(key, value interface{}) bool {
+		s.clients.Range(func(key, value any) bool {
 			client := value.(*Client)
 			client.Close()
 			return true
@@ -830,10 +832,10 @@ func (s *Server) handleShutdown() {
 	// Stop rate limiter
 	s.rateLimiter.Stop()
 
-	// KOLEJNOŚĆ: najpierw sygnał shutdown, POTEM zamknięcie listenera.
-	// Odwrotnie pętla accept dostawała błąd "use of closed network connection",
-	// a jej gałąź default (bo s.shutdown było jeszcze otwarte) logowała go
-	// w kółko, zajmując rdzeń na 100%.
+	// ORDER: signal shutdown first, THEN close the listener. The other way round
+	// the accept loop got a "use of closed network connection" error, and its
+	// default branch (because s.shutdown was still open) logged it in a tight loop,
+	// pinning a core at 100%.
 	close(s.shutdown)
 
 	// Close listener
@@ -863,8 +865,8 @@ func main() {
 	if err := common.InitLogger("server.log", level); err != nil {
 		log.Printf("Failed to initialize logger: %v", err)
 	}
-	// GlobalLogger zostaje nil, gdy InitLogger zawiedzie - bezwarunkowe
-	// GlobalLogger.Close() dereferencjonowało wtedy nil i panikowało przy wyjściu.
+	// GlobalLogger stays nil when InitLogger fails - an unconditional
+	// GlobalLogger.Close() would then dereference nil and panic on exit.
 	defer func() {
 		if common.GlobalLogger != nil {
 			common.GlobalLogger.Close()

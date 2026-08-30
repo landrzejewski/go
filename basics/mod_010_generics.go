@@ -340,11 +340,11 @@ func m010GenericFunctions() {
 - **Recursion is allowed but constrained**: `type Node[T any] struct { Next *Node[T] }` is fine;
   a type that instantiates itself with a *different* argument at each level is rejected, because it
   would need infinitely many instantiations.
-- This repo's `common/stack.go` is the same `Stack[T]`, kept there because it is the answer to
+- This repo's `examples/common/stack.go` is the same `Stack[T]`, kept there because it is the answer to
   exercise 2 in `notes.md`.
 */
 
-// m010Stack is the generic stack, mirroring common/stack.go.
+// m010Stack is the generic stack, mirroring examples/common/stack.go.
 type m010Stack[T any] struct {
 	items []T
 }
@@ -444,7 +444,7 @@ func m010GenericTypes() {
 	}
 	fmt.Println()
 
-	fmt.Println("  the same Stack[T] lives in common/stack.go - exercise 2 in notes.md")
+	fmt.Println("  the same Stack[T] lives in examples/common/stack.go - exercise 2 in notes.md")
 
 	// --- Generic functional options ---
 	// Module 005 Section 5 shows the concrete version; the type parameter makes one Option
@@ -532,10 +532,11 @@ Inference is what keeps generic Go readable. It runs in stages:
 ### Version history
 
 - **Go 1.21** made inference substantially stronger: it can now infer for a generic function
-  **assigned to a variable of function type**, and for **methods used as values**.
-- **Go 1.27** extended it to **all assignment contexts involving functions** — passing a generic
-  function as an argument to a function parameter, returning it, storing it in a struct field or a
-  map. Previously each of those needed explicit instantiation.
+  **assigned to a variable of function type**, **passed as an argument** to another function, and
+  for **methods used as values**.
+- **Go 1.27** generalised this into an *assignability* rule, so the remaining contexts work too:
+  storing a generic function in a **struct field**, a **map or slice value**, or **returning** it.
+  Previously each of those needed explicit instantiation.
 
 You may always instantiate explicitly. Do so when inference fails, and also when the explicit type
 makes the call clearer than the inference would.
@@ -595,9 +596,11 @@ func m010TypeInference() {
 	var minInt func(int, int) int = m010Min // inferred, no [int] needed
 	fmt.Printf("  Go 1.21: `var f func(int,int)int = m010Min` infers T: %v\n", minInt(4, 7))
 
-	// --- Go 1.27: inference in ALL assignment contexts involving functions ---
-	fmt.Printf("  Go 1.27: passing m010Min straight as an argument: %v\n",
+	// --- Go 1.21: a generic function passed straight as an argument ---
+	fmt.Printf("  Go 1.21: passing m010Min straight as an argument: %v\n",
 		m010CombineWith(m010Min, 9, 2))
+
+	// --- Go 1.27: the remaining assignment contexts (struct fields, maps, returns) ---
 
 	type holder struct{ Reduce func(string, string) string }
 	h := holder{Reduce: m010Min} // Go 1.27: inferred into a struct field
@@ -881,8 +884,9 @@ The best way to learn what generics are good for is to look at where the standar
   - **`slices`** (1.21) — `Sort`, `SortFunc`, `Contains`, `Index`, `Max`, `Min`, `Reverse`, `Clone`,
     `Equal`, `Compact`, `Insert`, `Delete`, `BinarySearch`, and the 1.23 iterator bridges
     `All`, `Values`, `Collect`, `Sorted`, `Backward`.
-  - **`maps`** (1.21) — `Keys`, `Values`, `All`, `Clone`, `Equal`, `Copy`, `DeleteFunc`, `Collect`.
-  - **`cmp`** (1.21) — the `Ordered` constraint, plus `Compare`, `Less` and `Or`.
+  - **`maps`** (1.21) — `Clone`, `Equal`, `EqualFunc`, `Copy`, `DeleteFunc`; plus the 1.23
+    iterator bridges `Keys`, `Values`, `All`, `Collect`, `Insert`.
+  - **`cmp`** (1.21) — the `Ordered` constraint, plus `Compare` and `Less`; `Or` is 1.22.
   - **`sync`** (1.21) — `OnceValue[T]`, `OnceValues[T1, T2]`, `OnceFunc`: lazy initialisation with
     no `sync.Once` boilerplate and no package-level variable.
   - **`iter`** (1.23) — `Seq[V]`, `Seq2[K, V]`, `Pull`, `Pull2`.
@@ -1095,7 +1099,7 @@ messages in their original context.
 
   - `basics/mod_012_iterators_and_collections.go` — `iter`, `slices`, `maps`, `cmp` in depth
   - `basics/mod_016_whats_new_1_21_to_1_27.go` — where each generic feature landed
-  - `common/stack.go`, `common/math.go` — generics used in earnest, with the pre-generics
+  - `examples/common/stack.go`, `examples/common/math.go` — generics used in earnest, with the pre-generics
     versions kept as commented teaching steps
 */
 

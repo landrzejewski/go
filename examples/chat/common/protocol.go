@@ -56,9 +56,9 @@ type Message struct {
 	Sender    string      `json:"sender"`
 	Recipient string      `json:"recipient,omitempty"` // Empty for broadcast, "*" for all
 	Room      string      `json:"room,omitempty"`
-	// RoomName niesie SAMĄ nazwę pokoju, oddzielnie od Content, w którym
-	// serwer umieszcza pełne zdanie dla użytkownika. Bez tego rozdzielenia
-	// klient zapisywał u siebie komunikat zamiast nazwy.
+	// RoomName carries JUST the room name, separate from Content, where the server
+	// puts the full sentence shown to the user. Without that split the client stored
+	// the message text where it meant to store the name.
 	RoomName    string     `json:"roomName,omitempty"`
 	Content     string     `json:"content,omitempty"`
 	Status      UserStatus `json:"status,omitempty"`
@@ -159,17 +159,17 @@ func (ft *FileTransfer) GetProgress() float64 {
 	return float64(len(ft.ReceivedChunks)) / float64(ft.TotalChunks) * 100
 }
 
-// AddChunk adds a chunk to the file transfer (używane po stronie ODBIORCY,
-// który faktycznie składa plik z fragmentów).
+// AddChunk adds a chunk to the file transfer (used on the RECEIVING side, which
+// actually reassembles the file from its fragments).
 func (ft *FileTransfer) AddChunk(chunkNum int, data []byte) {
 	ft.mutex.Lock()
 	defer ft.mutex.Unlock()
 	ft.ReceivedChunks[chunkNum] = data
 }
 
-// MarkChunkReceived odnotowuje sam FAKT otrzymania fragmentu, bez zapamiętywania
-// jego zawartości. Serwer tylko przekazuje dane dalej, więc trzymanie bajtów
-// oznaczałoby buforowanie całych plików w pamięci bez żadnego powodu.
+// MarkChunkReceived records only the FACT that a chunk arrived, without keeping
+// its contents. The server merely relays the data, so holding the bytes would mean
+// buffering whole files in memory for no reason.
 func (ft *FileTransfer) MarkChunkReceived(chunkNum int) {
 	ft.mutex.Lock()
 	defer ft.mutex.Unlock()

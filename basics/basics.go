@@ -1,8 +1,8 @@
 // Package basics is a complete, runnable tour of the Go language, built as training material.
 //
-// It follows the same shape as the Rust course material in this repository's basic/ directory:
-// numbered modules, a banner and a Markdown theory block per section, and one runnable demo
-// function per section. Read a module top to bottom, then run it and match the output to the code:
+// Each module is numbered and carries a banner, a Markdown theory block per section, and one
+// runnable demo function per section. Read a module top to bottom, then run it and match the
+// output to the code:
 //
 //	go run .        # list the modules
 //	go run . 004    # run one module

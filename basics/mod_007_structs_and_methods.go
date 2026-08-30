@@ -38,8 +38,10 @@ either embedding (reuse) or an interface (substitutability), and those two are k
 - The base type may be **any** defined type, not just a struct: a named slice, map, function or
   integer type can all have methods. `http.HandlerFunc` is a method on a *function* type; `sort.
   IntSlice` is a method set on a *slice* type.
-- The receiver may **not** be a pointer type or an interface type itself: `func (p *int) f()` is
-  invalid because `*int`'s base type `int` is not local.
+- Pointer receivers are of course fine (`func (t *T) M()`); the restriction is on the receiver's
+  **base type**, which may not itself be a pointer type or an interface type. So
+  `type P = *T; func (p P) M()` is rejected. Separately, the base type must be **local** to the
+  package, which is why `func (p *int) f()` is invalid — `int` is not declared here.
 - Methods live in the **package namespace with the type**, not with functions — so a method `Add` on
   one type does not collide with a method `Add` on another, and this is the only place Go allows
   what looks like overloading.

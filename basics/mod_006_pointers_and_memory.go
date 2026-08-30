@@ -326,7 +326,7 @@ func m006Describe(p *int) string {
   not known at compile time (`make([]byte, n)`).
 - **You can see the decisions**: `go build -gcflags='-m'` prints them, and `-m -m` explains why.
   This is the single most useful optimisation tool in Go, and it needs no profiler.
-- **Goroutine stacks start small (about 8 KB) and grow** by copying to a bigger stack, up to 1 GB by
+- **Goroutine stacks start small (2 KB) and grow** by copying to a bigger stack, up to 1 GB by
   default. That is why deep recursion usually works, and why passing large structs by value is not
   the disaster it would be with a fixed 1 MB stack.
 - Because stacks move, **a pointer's numeric address is not stable**. Never store one as an integer
@@ -334,7 +334,8 @@ func m006Describe(p *int) string {
 - The garbage collector is **concurrent, tri-colour, mark-and-sweep**, and is not generational or
   compacting. It is tuned for low pause times, not throughput. `GOGC` sets the growth target and
   `GOMEMLIMIT` (Go 1.19) sets a soft memory ceiling — the pair is what makes Go usable in containers.
-  Go 1.25 shipped the **Green Tea** garbage collector, which improves scanning locality.
+  Go 1.25 introduced the **Green Tea** garbage collector, which improves scanning locality; it
+  was opt-in via `GOEXPERIMENT=greenteagc` there and became the default in Go 1.26.
 - The optimisation that actually matters is **reducing allocation count**, not size: preallocate
   with `make([]T, 0, n)`, reuse buffers with `sync.Pool`, and avoid boxing into `any` in hot paths.
   Measure with `go test -bench . -benchmem` before changing anything.
@@ -382,12 +383,13 @@ func m006EscapeAnalysis() {
 	fmt.Println("  reducing the allocation COUNT is what matters; measure with -benchmem")
 
 	// Stack and GC facts.
-	fmt.Printf("goroutine stacks start around 8 KB and grow to a %d-byte limit by default\n",
+	fmt.Printf("goroutine stacks start at 2 KB and grow to a %d-byte limit by default\n",
 		int64(1)<<30)
 	fmt.Printf("GOMAXPROCS=%d  NumGoroutine=%d  NumCPU=%d\n",
 		runtime.GOMAXPROCS(0), runtime.NumGoroutine(), runtime.NumCPU())
 	fmt.Println("GOGC tunes the GC growth target; GOMEMLIMIT (Go 1.19) sets a soft ceiling")
-	fmt.Println("Go 1.25 shipped the Green Tea GC: better scanning locality, no API change")
+	fmt.Println("Green Tea GC: better scanning locality, no API change - experimental in 1.25,")
+	fmt.Println("the default since 1.26")
 }
 
 func m006StaysOnStack() int {

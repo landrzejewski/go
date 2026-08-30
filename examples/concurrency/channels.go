@@ -2,6 +2,7 @@ package concurrency
 
 import (
 	"fmt"
+	"sync"
 	"time"
 )
 
@@ -51,8 +52,13 @@ func Run() {
 		time.Sleep(time.Millisecond * 1000)
 	}*/
 
-	channel1 := make(chan int)
-	channel2 := make(chan int)
+	// Capacity 1 so that neither sender is stranded if the timeout branch below
+	// ever wins: on an unbuffered channel the unmatched `channel <- n` goroutine
+	// would block forever, which is a goroutine leak. (The timer itself is not a
+	// leak - since Go 1.23 an unreferenced Timer is garbage-collected even if it
+	// has not fired.)
+	channel1 := make(chan int, 1)
+	channel2 := make(chan int, 1)
 
 	go func() { channel1 <- 1 }()
 	go func() { channel2 <- 2 }()
@@ -76,22 +82,31 @@ func Run() {
 
 	channel := make(chan string)
 	listeners := make([]chan string, 3)
+
+	var wg sync.WaitGroup
 	for i := range listeners {
 		listeners[i] = make(chan string)
-		go listener(i, listeners[i])
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			listener(i, listeners[i])
+		}()
 	}
 	go broadcaster(channel, listeners)
 
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		channel <- fmt.Sprintf("Message %d", i)
 	}
 
-	// Zamknięcie kanału źródłowego kończy broadcaster, który w swoim defer
-	// zamyka kanały słuchaczy - dzięki temu wszystkie goroutines kończą się
-	// same i nie zostaje żaden wyciek.
+	// Closing the source channel ends the broadcaster, which in its defer closes
+	// the listener channels - so every goroutine finishes on its own and nothing
+	// leaks.
 	close(channel)
-	// Czekamy, aż słuchacze wypiszą to, co jeszcze mają w kolejce.
-	time.Sleep(1 * time.Second)
+
+	// Wait for the listeners to drain what is still queued. An earlier version used
+	// time.Sleep here, which is not a synchronisation primitive: Run could return
+	// while the listeners were still printing.
+	wg.Wait()
 }
 
 func listener(id int, channel <-chan string) {
@@ -101,9 +116,9 @@ func listener(id int, channel <-chan string) {
 }
 
 func broadcaster(channel <-chan string, listeners []chan string) {
-	// Broadcaster jest jedynym nadawcą dla kanałów słuchaczy, więc to on musi
-	// je zamknąć. Bez tego `for range` w każdym listenerze nigdy się nie kończy
-	// i po zamknięciu `channel` zostają trzy zawieszone goroutines.
+	// The broadcaster is the sole sender on the listener channels, so it is the one
+	// that must close them. Without that the `for range` in each listener never
+	// ends, and closing `channel` leaves three goroutines hanging.
 	defer func() {
 		for _, listener := range listeners {
 			close(listener)

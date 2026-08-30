@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-	"tcp-chat/common"
+	"training.pl/go/examples/chat/common"
 	"unicode/utf8"
 )
 
@@ -17,8 +17,8 @@ var (
 
 // ValidateNickname validates a nickname according to the rules
 func ValidateNickname(nickname string) error {
-	// utf8.RuneCountInString, a nie len(): len liczy BAJTY, więc limit "20
-	// znaków" oznaczałby w praktyce ~6 znaków CJK albo 10 polskich z ogonkami.
+	// utf8.RuneCountInString, not len(): len counts BYTES, so a "20 characters"
+	// limit would in practice mean ~6 CJK characters, or 10 accented Polish ones.
 	length := utf8.RuneCountInString(nickname)
 	if length < common.MinNicknameLength {
 		return fmt.Errorf("nickname must be at least %d characters long", common.MinNicknameLength)
@@ -29,8 +29,8 @@ func ValidateNickname(nickname string) error {
 	if !nicknameRegex.MatchString(nickname) {
 		return errors.New("nickname can only contain letters, numbers, underscores, and hyphens")
 	}
-	// "Server" jest nadawcą wszystkich komunikatów systemowych - bez tego
-	// zastrzeżenia dowolny użytkownik mógł się pod serwer podszyć.
+	// "Server" is the sender of every system message - without reserving it any
+	// user could impersonate the server.
 	if strings.EqualFold(nickname, "Server") {
 		return errors.New("nickname 'Server' is reserved")
 	}
@@ -38,8 +38,8 @@ func ValidateNickname(nickname string) error {
 }
 
 // ValidateRoomName validates a room name according to the rules.
-// UWAGA: TrimSpace działa tylko na lokalnej kopii - walidujemy tę samą postać,
-// którą zapisuje wywołujący (handleRoomMessage też robi TrimSpace).
+// NOTE: TrimSpace works on a local copy only - we validate the same form the
+// caller stores (handleRoomMessage trims as well).
 func ValidateRoomName(roomName string) error {
 	roomName = strings.TrimSpace(roomName)
 
@@ -61,8 +61,8 @@ func ValidateMessage(content string) error {
 	if len(content) == 0 {
 		return errors.New("message cannot be empty")
 	}
-	// MaxMessageSize jest limitem w BAJTACH (chroni bufor odczytu), więc
-	// komunikat też mówi o bajtach - inaczej wprowadzałby w błąd przy tekstach
+	// MaxMessageSize is a limit in BYTES (it protects the read buffer), so the
+	// message says bytes too - otherwise it would mislead for text
 	// spoza ASCII.
 	if len(content) > common.MaxMessageSize {
 		return fmt.Errorf("message cannot exceed %d bytes", common.MaxMessageSize)

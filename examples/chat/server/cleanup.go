@@ -2,9 +2,10 @@ package main
 
 import (
 	"log"
+	"sync"
 	"time"
 
-	"tcp-chat/common"
+	"training.pl/go/examples/chat/common"
 )
 
 // CleanupManager handles periodic cleanup of resources
@@ -12,6 +13,7 @@ type CleanupManager struct {
 	server   *Server
 	ticker   *time.Ticker
 	stopChan chan bool
+	stopOnce sync.Once
 }
 
 // NewCleanupManager creates a new cleanup manager
@@ -28,10 +30,14 @@ func (cm *CleanupManager) Start() {
 	go cm.run()
 }
 
-// Stop stops the cleanup routine
+// Stop stops the cleanup routine. It is safe to call more than once: closing an
+// already closed channel panics, and RateLimiter.Stop in this package already
+// guards against that with a sync.Once - this now matches it.
 func (cm *CleanupManager) Stop() {
-	cm.ticker.Stop()
-	close(cm.stopChan)
+	cm.stopOnce.Do(func() {
+		cm.ticker.Stop()
+		close(cm.stopChan)
+	})
 }
 
 // run executes periodic cleanup tasks
@@ -53,7 +59,7 @@ func (cm *CleanupManager) cleanupFileTransfers() {
 	var toDelete []string
 
 	// Find stale transfers
-	cm.server.fileTransfers.Range(func(key, value interface{}) bool {
+	cm.server.fileTransfers.Range(func(key, value any) bool {
 		fileID := key.(string)
 		ft := value.(*common.FileTransfer)
 
@@ -88,12 +94,12 @@ func (cm *CleanupManager) cleanupFileTransfers() {
 	}
 }
 
-// cleanupEmptyRooms usuwa pokoje, które stoją puste dłużej niż EmptyRoomTimeout.
+// cleanupEmptyRooms removes rooms that have stood empty longer than EmptyRoomTimeout.
 //
-// Liczy się czas OD OPUSTOSZENIA (Room.LastEmptyAt), a nie od utworzenia.
-// Poprzednia wersja porównywała CreatedAt, więc pokój sprzed 31 minut znikał
-// w chwili wyjścia ostatniego członka, a pokój sprzed minuty przeżywał pusty -
-// mimo że komentarz obiecywał coś zupełnie innego.
+// What counts is the time SINCE THE ROOM BECAME EMPTY (Room.LastEmptyAt), not
+// since it was created. The previous version compared CreatedAt, so a 31-minute-old
+// room vanished the moment its last member left, while a one-minute-old room
+// survived empty - even though the comment promised something entirely different.
 func (cm *CleanupManager) cleanupEmptyRooms() {
 	now := time.Now()
 	var toDelete []string
@@ -117,7 +123,7 @@ func (cm *CleanupManager) cleanupEmptyRooms() {
 
 	// Delete empty rooms
 	for _, roomID := range toDelete {
-		// Zwolnienie limitu pokoi twórcy - patrz komentarz przy RoomDelete.
+		// Release the creator's room quota - see the comment on RoomDelete.
 		cm.server.rateLimiter.RemoveRoom(creators[roomID])
 		cm.server.roomManager.RemoveRoom(roomID)
 	}

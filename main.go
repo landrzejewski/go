@@ -6,9 +6,9 @@
 //	go run . 004    # run a single module
 //	go run . all    # run the whole course, in order
 //
-// The other directories hold the exercise solutions listed in notes.md: concurrency/ for the
-// goroutine material, examples/ for the CLI, REST, chat, budget and flat-file-database exercises,
-// and common/ for the shared generic helpers.
+// The exercise solutions listed in notes.md all live under examples/: examples/concurrency/ for
+// the goroutine material, examples/common/ for the shared generic helpers, and examples/ itself
+// for the CLI, REST, chat, budget and flat-file-database exercises.
 package main
 
 import (
@@ -59,11 +59,16 @@ func usage() {
 	}
 	fmt.Println()
 	fmt.Println("other demos in this repo (see notes.md for the exercise statements):")
-	fmt.Println("  concurrency.Barbers()     sleeping barber problem")
-	fmt.Println("  concurrency.Run()         goroutines, channels, select")
-	fmt.Println("  examples.RestApi()        Gin + PostgreSQL REST API (needs docker-compose up)")
-	fmt.Println("  examples.Cat()            cat(1) clone with -n / -nb")
-	fmt.Println("  budget.*                  household budget CLI with JSON persistence")
-	fmt.Println("  db.DatabaseTest()         flat-file binary database")
-	fmt.Println("  chat.Server / chat.Client TCP chat")
+	fmt.Println("  these are library packages - call them from a test or a scratch main,")
+	fmt.Println("  except the chat, which is two real commands:")
+	fmt.Println()
+	fmt.Println("    examples/concurrency  Barbers(), Run(), FindFiles(), ProducerConsumer*()")
+	fmt.Println("    examples/common       Stack[T], Add[T], gob helpers")
+	fmt.Println("    examples              RestApi() (needs docker-compose up), Cat(), Find(), Grep(),")
+	fmt.Println("                          Echo(), TicTacToe(), MonetaryAmount(), Reflect()")
+	fmt.Println("    examples/budget       household budget entries with JSON persistence")
+	fmt.Println("    examples/db           DatabaseTest() - flat-file binary database")
+	fmt.Println()
+	fmt.Println("    go run ./examples/chat/server    TCP chat server")
+	fmt.Println("    go run ./examples/chat/client    TCP chat client")
 }

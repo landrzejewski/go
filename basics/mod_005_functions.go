@@ -38,7 +38,7 @@ you exactly which one runs.
   does not use them — useful when satisfying an interface.
 - Functions are **not** required to be declared before use: package-level order does not matter.
 - Recursion works with no special syntax. Go has **no tail-call optimisation**, so deep recursion
-  grows the stack — but goroutine stacks start at ~8 KB and grow dynamically up to 1 GB, so
+  grows the stack — but goroutine stacks start at 2 KB and grow dynamically up to 1 GB, so
   recursion depths that would overflow in C are usually fine.
 */
 

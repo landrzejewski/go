@@ -1,6 +1,9 @@
 package common
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
 
 // ErrorType represents the type of error
 type ErrorType string
@@ -19,7 +22,7 @@ const (
 type ChatError struct {
 	Type    ErrorType
 	Message string
-	Details map[string]interface{}
+	Details map[string]any
 }
 
 // Error implements the error interface
@@ -32,19 +35,24 @@ func NewChatError(errType ErrorType, message string) *ChatError {
 	return &ChatError{
 		Type:    errType,
 		Message: message,
-		Details: make(map[string]interface{}),
+		Details: make(map[string]any),
 	}
 }
 
 // WithDetail adds a detail to the error
-func (e *ChatError) WithDetail(key string, value interface{}) *ChatError {
+func (e *ChatError) WithDetail(key string, value any) *ChatError {
 	e.Details[key] = value
 	return e
 }
 
-// IsType checks if error is of specific type
+// IsType reports whether err is a *ChatError of the given type.
+//
+// errors.As rather than a direct type assertion: an assertion only inspects the
+// outermost error, so it returns false as soon as the *ChatError has been wrapped
+// with fmt.Errorf("...: %w", err). errors.As walks the whole chain.
 func IsType(err error, errType ErrorType) bool {
-	if chatErr, ok := err.(*ChatError); ok {
+	var chatErr *ChatError
+	if errors.As(err, &chatErr) {
 		return chatErr.Type == errType
 	}
 	return false

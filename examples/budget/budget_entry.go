@@ -6,18 +6,18 @@ import (
 )
 
 type BudgetEntry struct {
-	// Kwota w GROSZACH (jednostkach minorowych) jako liczba całkowita.
-	// float64 nie reprezentuje dokładnie 0.01/0.10/0.20, więc sumowanie księgi
-	// kumulowałoby błąd, a formatowanie %.2f by go ukrywało.
+	// The amount in GROSZE (minor units) as an integer. float64 cannot represent
+	// 0.01/0.10/0.20 exactly, so summing the ledger would accumulate error and
+	// %.2f formatting would hide it.
 	AmountMinor   int64         `json:"amountMinor"`
 	OperationType OperationType `json:"operationType"`
 	Timestamp     time.Time     `json:"timestamp"`
 	Description   string        `json:"description"`
 }
 
-// Typ ZDEFINIOWANY, nie alias. Poprzednie `type OperationType = int` czyniło
-// OperationType i int tym samym typem: dowolny int przechodził jako rodzaj
-// operacji i nie dało się dodać metody String().
+// A DEFINED type, not an alias. The previous `type OperationType = int` made
+// OperationType and int the same type: any int passed as an operation kind, and
+// there was no way to attach a String() method.
 type OperationType int
 
 const (
@@ -37,7 +37,7 @@ func (o OperationType) String() string {
 	return fmt.Sprintf("OperationType(%d)", int(o))
 }
 
-// FormatMinor formatuje grosze jako kwotę z dwoma miejscami po przecinku.
+// FormatMinor renders minor units as an amount with two decimal places.
 func FormatMinor(minor int64) string {
 	sign := ""
 	if minor < 0 {

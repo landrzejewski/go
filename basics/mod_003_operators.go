@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"math/bits"
+	"slices"
 )
 
 /*
@@ -166,7 +167,7 @@ func m003ComparisonOperators() {
 	// --- Uncomparable types ---
 	s1, s2 := []int{1, 2}, []int{1, 2}
 	//	fmt.Println(s1 == s2) // ERROR: invalid operation: s1 == s2 (slice can only be compared to nil)
-	fmt.Printf("slices compare only to nil; use slices.Equal: %t\n", len(s1) == len(s2))
+	fmt.Printf("slices compare only to nil; use slices.Equal: %t\n", slices.Equal(s1, s2))
 
 	// An interface holding an uncomparable value panics at RUNTIME, not compile time.
 	var i1, i2 any = []int{1}, []int{1}
@@ -448,8 +449,12 @@ than every binary operator.
 - The consequence that surprises people: **`&` and `<<` bind tighter than `+`**, and `|` and `^`
   bind at the *same* level as `+`. In C, `&` binds *looser* than `==`, which is why C programmers
   learn to parenthesise `(a & b) == c`. In Go that expression already means what it looks like.
-- But the flip side bites: `a + b | c` parses as `(a + b) | c` in Go, because `+` and `|` share
-  level 4 and association is left to right. In C it would be `a + (b | c)`.
+- `a + b | c` parses as `(a + b) | c` in Go, because `+` and `|` share level 4 and association is
+  left to right. C happens to agree here, because C also binds `+` tighter than `|`.
+- The genuine flip side is the *shift* and *XOR* levels, where Go and C really do disagree:
+  `<<`/`>>` are level 5 in Go (tighter than `+`) but looser than `+` in C, and `^` is level 4 in Go
+  but much looser in C. So `1 + 2<<3` is **17** in Go and **24** in C, and `3 ^ 5 + 1` is **7** in
+  Go and **5** in C.
 - Comparisons bind looser than all arithmetic and bitwise operators, and tighter than `&&` / `||`,
   so `a+1 == b && c > d` needs no parentheses.
 - `*` is context-dependent: binary multiplication at level 5, unary pointer dereference otherwise.
@@ -470,9 +475,13 @@ func m003PrecedenceAndAssociativity() {
 	// The C trap that does NOT exist in Go: & binds tighter than ==.
 	fmt.Printf("6 & 3 == 2  = %t   (parses as (6&3) == 2; in C this would be 6 & (3==2))\n", 6&3 == 2)
 
-	// The Go trap that C programmers do not expect: + and | share a level.
+	// + and | share level 4, so this is (3+5) | 6. C parses it the same way.
 	fmt.Printf("3 + 5 | 6   = %d  (level 4, left to right: (3+5) | 6 = 8|6)\n", 3+5|6)
-	fmt.Printf("3 + (5 | 6) = %d  (what C would have given: 3 + 7)\n", 3+(5|6))
+
+	// The Go traps that C programmers really do not expect: << is TIGHTER than +
+	// in Go but looser in C, and ^ (XOR) sits at level 4 in Go but much lower in C.
+	fmt.Printf("1 + 2<<3    = %d  (Go: 1 + (2<<3) = 17; C would give (1+2)<<3 = 24)\n", 1+2<<3)
+	fmt.Printf("3 ^ 5 + 1   = %d   (Go: 3 ^ (5+1) = 7; C would give (3^5) + 1 = 5)\n", 3^5+1)
 
 	// Comparisons are looser than arithmetic, tighter than && and ||.
 	a, b, c, d := 1, 2, 3, 4

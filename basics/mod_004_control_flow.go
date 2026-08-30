@@ -325,8 +325,10 @@ func m004ForLoops() {
 	fmt.Println()
 
 	// --- Go 1.22: the loop variable is fresh in every iteration ---
+	// Deliberately the three-clause form: `for i := range 3` is itself new in Go 1.22,
+	// so it has no "before" to compare against. This loop does.
 	var closures []func() int
-	for i := range 3 {
+	for i := 0; i < 3; i++ {
 		closures = append(closures, func() int { return i }) // captures THIS iteration's i
 	}
 	fmt.Print("  closures capturing the loop variable: ")

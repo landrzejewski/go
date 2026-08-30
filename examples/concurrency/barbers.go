@@ -2,15 +2,14 @@ package concurrency
 
 import (
 	"fmt"
-	"math/rand"
+	"math/rand/v2"
 	"sync"
 	"time"
 )
 
-type Barber struct {
-	id int
-}
-
+// Client is what travels through the waiting-room channel. There is deliberately
+// no Barber type: a barber is a goroutine, and its only state is the id already
+// passed to it as a parameter.
 type Client struct {
 	id int
 }
@@ -18,19 +17,18 @@ type Client struct {
 type BarberShop struct {
 	numBarbers      int
 	waitingRoomSize int
-	// clientsChan JEST poczekalnią: jego bufor ma dokładnie waitingRoomSize
-	// miejsc. Wcześniejsza wersja trzymała dodatkowo licznik currentSize
-	// w osobnej goroutine - dwa źródła prawdy o tym samym stanie rozjeżdżały
-	// się (klient zwiększał licznik przed wysłaniem do kanału, a fryzjer
-	// zmniejszał go dopiero po odbiorze), przez co klient bywał odsyłany mimo
-	// wolnego miejsca. Tutaj wysyłka z `select`/`default` jest jednocześnie
-	// sprawdzeniem i zajęciem miejsca, więc nie ma okna na wyścig (TOCTOU).
+	// clientsChan IS the waiting room: its buffer holds exactly waitingRoomSize
+	// seats. An earlier version also kept a separate currentSize counter in its own
+	// goroutine - two sources of truth for one piece of state, and they drifted
+	// apart (a client incremented the counter before sending to the channel, while
+	// a barber decremented it only after receiving), so clients were turned away
+	// with seats still free. Here the `select`/`default` send is both the check and
+	// the claim, so there is no window for a race (TOCTOU).
 	clientsChan       chan *Client
 	shopOpenDuration  time.Duration
 	haircutDuration   time.Duration
 	clientArrivalRate time.Duration
 	wg                sync.WaitGroup
-	rand              *rand.Rand
 }
 
 func NewBarberShop(numBarbers, waitingRoomSize int, shopOpenDuration, haircutDuration, clientArrivalRate time.Duration) *BarberShop {
@@ -41,32 +39,30 @@ func NewBarberShop(numBarbers, waitingRoomSize int, shopOpenDuration, haircutDur
 		shopOpenDuration:  shopOpenDuration,
 		haircutDuration:   haircutDuration,
 		clientArrivalRate: clientArrivalRate,
-		rand:              rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
 }
 
 func (bs *BarberShop) barber(id int) {
 	defer bs.wg.Done()
-	barber := &Barber{id: id}
 	fmt.Printf("Barber %d: Ready to work\n", id)
 
-	// range po kanale: fryzjer śpi (blokuje się), gdy nie ma klientów, budzi
-	// się na nowego, a kończy dopiero gdy kanał jest zamknięty I pusty -
-	// czyli po zamknięciu zakładu i obsłużeniu całej poczekalni.
+	// range over a channel: the barber sleeps (blocks) while there are no clients,
+	// wakes up for a new one, and returns only once the channel is closed AND empty
+	// - that is, after the shop has closed and the waiting room has been served.
 	for client := range bs.clientsChan {
 		fmt.Printf("Barber %d: Cutting hair for client %d (waiting room: %d/%d)\n",
-			barber.id, client.id, len(bs.clientsChan), bs.waitingRoomSize)
+			id, client.id, len(bs.clientsChan), bs.waitingRoomSize)
 		time.Sleep(bs.haircutDuration)
-		fmt.Printf("Barber %d: Finished cutting hair for client %d\n", barber.id, client.id)
+		fmt.Printf("Barber %d: Finished cutting hair for client %d\n", id, client.id)
 	}
 
-	fmt.Printf("Barber %d: Going home\n", barber.id)
+	fmt.Printf("Barber %d: Going home\n", id)
 }
 
 func (bs *BarberShop) addClient(id int) {
 	client := &Client{id: id}
 
-	// Sprawdzenie i zajęcie miejsca w jednej niepodzielnej operacji.
+	// Check for a free seat and claim it in one indivisible operation.
 	select {
 	case bs.clientsChan <- client:
 		fmt.Printf("Client %d: Entered waiting room (seats occupied: %d/%d)\n",
@@ -74,6 +70,15 @@ func (bs *BarberShop) addClient(id int) {
 	default:
 		fmt.Printf("Client %d: Waiting room full, leaving\n", id)
 	}
+}
+
+// nextArrival returns the base arrival interval plus up to 50% random jitter.
+func (bs *BarberShop) nextArrival() time.Duration {
+	// rand.N panics for n <= 0, so only draw when the range is positive.
+	if half := bs.clientArrivalRate / 2; half > 0 {
+		return bs.clientArrivalRate + rand.N(half)
+	}
+	return bs.clientArrivalRate
 }
 
 func (bs *BarberShop) Start() {
@@ -88,25 +93,22 @@ func (bs *BarberShop) Start() {
 	closingTimer := time.After(bs.shopOpenDuration)
 	clientID := 1
 
-	clientTicker := time.NewTicker(bs.clientArrivalRate)
-	defer clientTicker.Stop()
+	// Arrivals are jittered by resetting a timer to a fresh random interval each
+	// round. Sleeping inside the `case` instead would stall the whole select loop,
+	// so the closing timer would be serviced late and the shop would stay open past
+	// shopOpenDuration.
+	arrival := time.NewTimer(bs.nextArrival())
+	defer arrival.Stop()
 
 	shopOpen := true
 
 	for shopOpen {
 		select {
-		case <-clientTicker.C:
-			// rand.Intn panikuje dla n <= 0, więc losujemy tylko wtedy, gdy
-			// przedział jest dodatni.
-			if half := int(bs.clientArrivalRate / 2); half > 0 {
-				if variation := time.Duration(bs.rand.Intn(half)); variation > 0 {
-					time.Sleep(variation)
-				}
-			}
-
+		case <-arrival.C:
 			fmt.Printf("Client %d: Arriving at shop\n", clientID)
 			bs.addClient(clientID)
 			clientID++
+			arrival.Reset(bs.nextArrival())
 
 		case <-closingTimer:
 			fmt.Println("\nBarber shop is closing! No new clients accepted.")
@@ -114,9 +116,9 @@ func (bs *BarberShop) Start() {
 		}
 	}
 
-	// Zamknięcie kanału oznacza "koniec przyjęć". Fryzjerzy dokańczają tych,
-	// którzy siedzą już w poczekalni, i dopiero potem wychodzą - zgodnie
-	// z regułą "barbers cannot leave until the waiting room is empty".
+	// Closing the channel means "no more admissions". The barbers finish everyone
+	// already seated in the waiting room and only then go home - matching the rule
+	// "barbers cannot leave until the waiting room is empty".
 	close(bs.clientsChan)
 	bs.wg.Wait()
 

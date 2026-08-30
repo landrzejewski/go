@@ -401,7 +401,9 @@ func m002bMaps() {
       silently when the struct changes, and `go vet` warns about it for structs from other packages.
 - **Go 1.27**: a key in a struct literal may now be **any valid field selector**, including a
   promoted field from an embedded struct — `Line{name: "diagonal"}` where `name` comes from an
-  embedded `Object`. Previously only top-level field names were allowed.
+  embedded `Object`. Previously only top-level field names were allowed. The selector may not
+  traverse a **pointer**-typed embedded field, though: there is no struct to initialise behind a
+  nil pointer.
 - Structs are **comparable** with `==` if and only if every field is. Comparing structs containing
   a slice or map is a compile error; comparing an interface field that holds an uncomparable value
   panics at runtime.

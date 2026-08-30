@@ -35,14 +35,17 @@ If you learned Go before 1.21, this module is the one with the most that is new 
 	func(yield func(K, V) bool)     // for k, v := range f
 
 - The `iter` package names the last two: **`iter.Seq[V]`** and **`iter.Seq2[K, V]`**. They are
-  ordinary generic type aliases for those function types — there is no magic and no interface.
+  ordinary generic type *definitions* for those function types (`type Seq[V any] func(...)`, no
+  `=`) — there is no magic and no interface. Note they are definitions, not aliases: generic
+  aliases only became legal in Go 1.24, while `iter` shipped in 1.23.
 - **How it works**: `range` calls your function, passing it a `yield` closure that contains the loop
   body. You call `yield` once per element. `yield` returns `false` when the loop body executed a
   `break`, `return`, `goto` or a labelled continue out of the loop — at which point **you must stop
   and return**.
 - Ignoring `yield`'s result is the one real hazard. If you keep yielding after `false`, the runtime
-  panics with `range function continued iteration after loop body panic` or similar. Always write
-  `if !yield(v) { return }`.
+  panics with `range function continued iteration after function for loop body returned false`.
+  (The similarly worded `...after loop body panic` is the separate case of continuing once the loop
+  body has panicked.) Always write `if !yield(v) { return }`.
 - Iterators are **lazy** and compose without building intermediate slices, and they work over things
   that are not collections at all — a file's lines, a database cursor, a tree walk, an infinite
   sequence.
@@ -410,8 +413,15 @@ func m012MapsPackage() {
 	})
 	fmt.Printf("  SortedFunc over maps.Keys, by length: %v\n", byLen)
 
-	// maps.All is an iter.Seq2, so range it directly (in random order) or collect it first.
-	fmt.Print("  maps.All as an iter.Seq2: ")
+	// maps.All is an iter.Seq2, so range it directly - note the order is random, which
+	// is why the sorted walk below exists at all.
+	fmt.Print("  maps.All as an iter.Seq2 (random order): ")
+	for k, v := range maps.All(m) {
+		fmt.Printf("%s=%d ", k, v)
+	}
+	fmt.Println()
+
+	fmt.Print("  the same pairs, walked in sorted key order: ")
 	for _, k := range slices.Sorted(maps.Keys(m)) {
 		fmt.Printf("%s=%d ", k, m[k])
 	}

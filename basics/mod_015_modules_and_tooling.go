@@ -109,8 +109,9 @@ func m015Modules() {
 	go get example.com/pkg@none       remove
 	go get -u ./...                   upgrade everything (be careful)
 
-Since **Go 1.22**, `go get` no longer installs binaries — that is `go install pkg@version`, which
-builds in module-aware mode without touching your `go.mod`.
+Since **Go 1.18**, `go get` no longer builds or installs packages — that is `go install
+pkg@version`, which builds in module-aware mode without touching your `go.mod`. (Go 1.22 went one
+step further and dropped `go get` outside a module in legacy GOPATH mode.)
 
 ### Tool dependencies (Go 1.24)
 
@@ -157,7 +158,7 @@ func m015Dependencies() {
 	fmt.Println()
 	fmt.Println("  go get pkg@latest / @v1.2.3 / @none")
 	fmt.Println("  go install pkg@version   <- installs a BINARY, without touching go.mod")
-	fmt.Println("  (since Go 1.22 `go get` no longer installs binaries at all)")
+	fmt.Println("  (since Go 1.18 `go get` no longer builds or installs packages)")
 	fmt.Println()
 	fmt.Println("  Go 1.24 tool dependencies replace the old tools.go hack:")
 	fmt.Println("    go get -tool golang.org/x/tools/cmd/stringer")
@@ -169,8 +170,10 @@ func m015Dependencies() {
 	fmt.Println("  go.work is LOCAL state and is normally not committed - unlike a `replace`")
 	fmt.Println("  directive in go.mod, which would ship to your users")
 	fmt.Println()
-	fmt.Println("  note: examples/chat/ in this repo is a SEPARATE module (module chat),")
-	fmt.Println("  so `go build ./...` at the root does not see it - a workspace would join them")
+	fmt.Println("  a nested go.mod CUTS its subtree out of the parent module: `go build ./...`")
+	fmt.Println("  at the root stops descending into it, and `go list ./...` never lists it -")
+	fmt.Println("  which is exactly how a nested module goes stale unnoticed. Use a workspace")
+	fmt.Println("  (or one module) unless the subtree is really published on its own.")
 	fmt.Println()
 	fmt.Println("  GOTOOLCHAIN=auto (the default) downloads a newer Go if go.mod asks for one;")
 	fmt.Println("  GOTOOLCHAIN=local refuses to")
@@ -367,8 +370,10 @@ of `go test`. The checks that earn their keep:
   - **lostcancel** — a `context.CancelFunc` not called on every path
   - **loopclosure** — capturing a loop variable (now mostly moot, post-1.22)
   - **structtag** — a malformed struct tag
-  - **nilfunc**, **unmarshal**, **unusedresult**, **shadow** (off by default), **fieldalignment**
-    (off by default)
+  - **nilfunc**, **unmarshal**, **unusedresult**
+
+`shadow` and `fieldalignment` are *not* part of `go vet`'s built-in suite: they ship in
+`golang.org/x/tools` and are run through `go vet -vettool=$(which shadow)`.
 
 Every one of those found a real mistake while this training package was being written.
 
@@ -517,7 +522,7 @@ The conventions that are genuinely worth following:
   separate reason to change.
 - **Name packages for what they provide, not what they contain.** `http`, not `httputils`. Avoid
   `util`, `common`, `helpers`, `base`, `misc` — a package that could hold anything ends up holding
-  everything, and it becomes an import-cycle magnet. (`common/` in this repository is a mild example
+  everything, and it becomes an import-cycle magnet. (`examples/common/` in this repository is a mild example
   of exactly that.)
 - **Package names are lower case, one word, no underscores, no plurals.** The name is repeated at
   every call site, so `strconv.Quote` beats `string_conversion_utils.Quote`.
@@ -548,7 +553,7 @@ func m015ProjectLayout() {
 	fmt.Println("    good: http, strconv, slices, bytes")
 	fmt.Println("    bad:  util, common, helpers, base, misc")
 	fmt.Println("  a package that could hold anything ends up holding everything, and becomes")
-	fmt.Println("  an import-cycle magnet - `common/` in this repo is a mild example")
+	fmt.Println("  an import-cycle magnet - `examples/common/` in this repo is a mild example")
 	fmt.Println()
 	fmt.Println("  avoid stutter: bytes.Buffer, not bytes.BytesBuffer; user.User at worst")
 	fmt.Println("  put interfaces with the CONSUMER, not the producer (module 008)")

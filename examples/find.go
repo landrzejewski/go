@@ -3,6 +3,7 @@ package examples
 import (
 	"flag"
 	"fmt"
+	"io/fs"
 	"log"
 	"os"
 	"path/filepath"
@@ -10,7 +11,7 @@ import (
 )
 
 func Find() {
-	path := flag.String("p", "", "Start path")
+	path := flag.String("p", ".", "Start path")
 	name := flag.String("n", "", "Name to match")
 	fileType := flag.String("t", "", "Type to match (file, dir, symlink)")
 
@@ -24,40 +25,43 @@ func Find() {
 	switch *fileType {
 	case "file", "dir", "symlink":
 	default:
-		log.Fatalf("Nieznany typ %q, dozwolone: file, dir, symlink", *fileType)
+		log.Fatalf("unknown type %q, allowed: file, dir, symlink", *fileType)
 	}
 
-	if *path == "" {
-		*path = "."
-	}
-
-	if err := filepath.Walk(*path, onElement(*fileType, *name)); err != nil {
-		log.Fatalf("Błąd przeszukiwania %q: %v", *path, err)
+	// WalkDir rather than Walk: since Go 1.16 it is the recommended form, because
+	// it hands the callback an fs.DirEntry instead of an fs.FileInfo and therefore
+	// avoids a stat(2) call for every single entry.
+	if err := filepath.WalkDir(*path, onElement(*fileType, *name)); err != nil {
+		log.Fatalf("error walking %q: %v", *path, err)
 	}
 }
 
-func onElement(fileType, name string) filepath.WalkFunc {
-	return func(path string, info os.FileInfo, err error) error {
+func onElement(fileType, name string) fs.WalkDirFunc {
+	return func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
-			return err
-		}
-		if !strings.Contains(info.Name(), name) {
+			// One unreadable directory must not abort the whole walk - report it
+			// and carry on, which is what grep.go does too. Returning err here
+			// would stop everything.
+			log.Printf("skipping %q: %v", path, err)
 			return nil
 		}
-		// Uwaga: wcześniej pierwszy case brzmiał `case fileType:`, czyli
-		// porównywał zmienną samą ze sobą - pasował ZAWSZE, przez co gałęzie
-		// "dir" i "symlink" były martwym kodem, a -t dir działało jak -t file.
+		if !strings.Contains(entry.Name(), name) {
+			return nil
+		}
+		// Note: the first case used to read `case fileType:`, which compared the
+		// variable with itself - it matched ALWAYS, so the "dir" and "symlink"
+		// branches were dead code and -t dir behaved like -t file.
 		switch fileType {
 		case "file":
-			if info.Mode().IsRegular() {
+			if entry.Type().IsRegular() {
 				fmt.Println(path)
 			}
 		case "dir":
-			if info.Mode().IsDir() {
+			if entry.IsDir() {
 				fmt.Println(path)
 			}
 		case "symlink":
-			if info.Mode()&os.ModeSymlink == os.ModeSymlink {
+			if entry.Type()&os.ModeSymlink != 0 {
 				fmt.Println(path)
 			}
 		}

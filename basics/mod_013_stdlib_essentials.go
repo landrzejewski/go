@@ -3,6 +3,7 @@ package basics
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"encoding/json/jsontext"
 	jsonv2 "encoding/json/v2"
@@ -699,7 +700,8 @@ func m013Slog() {
 
 	// slog.GroupAttrs (Go 1.25): build a group from a slice.
 	attrs := []slog.Attr{slog.String("region", "eu"), slog.Int("shard", 2)}
-	text.LogAttrs(nil, slog.LevelInfo, "placement", slog.GroupAttrs("location", attrs...))
+	// context.Background(), not nil: module 011 states the rule - never pass a nil Context.
+	text.LogAttrs(context.Background(), slog.LevelInfo, "placement", slog.GroupAttrs("location", attrs...))
 	fmt.Println("  ^ slog.GroupAttrs (Go 1.25) builds a group from a []slog.Attr")
 
 	// --- JSON handler ---

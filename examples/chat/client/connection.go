@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"tcp-chat/common"
+	"training.pl/go/examples/chat/common"
 )
 
 // Connection manages the server connection
@@ -59,8 +59,8 @@ func NewConnection(nickname string) *Connection {
 
 // Connect establishes connection to the server
 func (c *Connection) Connect(address string) error {
-	// Cancel any existing goroutines. c.cancel jest czytane pod c.mutex
-	// w Disconnect(), więc podmiana też musi odbyć się pod blokadą.
+	// Cancel any existing goroutines. c.cancel is read under c.mutex
+	// in Disconnect(), so swapping it must happen under the lock too.
 	c.mutex.Lock()
 	if c.cancel != nil {
 		c.cancel()
@@ -95,18 +95,18 @@ func (c *Connection) Connect(address string) error {
 		return err
 	}
 
-	// Sygnał dopiero PO udanej wysyłce CONNECT - wcześniej WaitForConnection()
-	// mogło wrócić także wtedy, gdy sendMessage następnie zawiodło.
+	// Signal only AFTER the CONNECT message was sent successfully - previously
+	// WaitForConnection() could also return when sendMessage then failed.
 	select {
 	case c.connectedChan <- true:
 	default:
 	}
 
 	// Start read and write pumps with context.
-	// ctx i conn przekazujemy jako wartości pobrane wcześniej pod blokadą -
-	// czytanie c.ctx / c.conn tutaj byłoby wyścigiem z ponownym Connect().
+	// ctx and conn are passed as values read earlier under the lock - reading
+	// c.ctx / c.conn here would race with another Connect().
 	go c.readPump(ctx, conn)
-	go c.writePump(ctx)
+	go c.writePump(ctx, conn)
 
 	return nil
 }
@@ -320,8 +320,8 @@ func (c *Connection) GetMessages() <-chan *common.Message {
 }
 
 // readPump reads messages from the server
-// readPump dostaje net.Conn parametrem zamiast czytać pole c.conn, które
-// Connect() zapisuje pod c.mutex - inaczej byłby to wyścig danych.
+// readPump takes the net.Conn as a parameter instead of reading the c.conn field,
+// which Connect() writes under c.mutex - otherwise it would be a data race.
 func (c *Connection) readPump(ctx context.Context, conn net.Conn) {
 	defer func() {
 		c.SetConnected(false)
@@ -353,16 +353,16 @@ func (c *Connection) readPump(ctx context.Context, conn net.Conn) {
 		if msg.Type == common.TypeFileChunk {
 			c.handleFileChunk(ctx, msg)
 		} else {
-			// Wiadomość inicjująca niesie nazwę pliku, rozmiar i liczbę
-			// fragmentów - same fragmenty już nie. Bez zarejestrowania
-			// transferu tutaj rekord powstawał dopiero z pierwszego fragmentu,
-			// z PUSTĄ nazwą, przez co zapis kończył się błędem
+			// The init message carries the file name, size and chunk count - the
+			// chunks themselves do not. Without registering the transfer here the
+			// record was created only from the first chunk, with an EMPTY name, so
+			// writing it failed with an error
 			// "invalid filename".
 			if msg.Type == common.TypeFile {
 				c.registerIncomingTransfer(msg)
 			}
-			// select z ctx.Done(): gdyby interfejs przestał odbierać, samo
-			// `c.receiveChan <- msg` blokowałoby tę goroutine na zawsze.
+			// select with ctx.Done(): if the UI stopped receiving, a bare
+			// `c.receiveChan <- msg` would block this goroutine forever.
 			select {
 			case c.receiveChan <- msg:
 			case <-ctx.Done():
@@ -376,12 +376,17 @@ func (c *Connection) readPump(ctx context.Context, conn net.Conn) {
 	}
 }
 
-// writePump writes messages to the server
-func (c *Connection) writePump(ctx context.Context) {
+// writePump writes messages to the server.
+//
+// Like readPump it receives conn as a parameter rather than reading the c.conn
+// field: Connect() writes that field under c.mutex, so touching it here would be a
+// data race - and after a reconnect the deferred Close would shut down the NEW
+// connection.
+func (c *Connection) writePump(ctx context.Context, conn net.Conn) {
 	ticker := time.NewTicker(30 * time.Second)
 	defer func() {
 		ticker.Stop()
-		c.conn.Close()
+		conn.Close()
 	}()
 
 	for {
@@ -395,10 +400,10 @@ func (c *Connection) writePump(ctx context.Context) {
 			}
 
 		case <-ticker.C:
-			// Faktyczny keep-alive: SERWER resetuje swój read deadline dopiero
-			// po udanym odczycie, więc trzeba mu coś WYSŁAĆ. Samo ustawienie
-			// write deadline (poprzednia wersja) nie wysyłało nic, przez co
-			// milczący użytkownik był rozłączany po ReadTimeout (60 s).
+			// A real keep-alive: the SERVER resets its read deadline only after a
+			// successful read, so something has to be SENT to it. Merely setting a
+			// write deadline (the previous version) sent nothing, so a silent user
+			// was disconnected after ReadTimeout (60 s).
 			keepAlive := &common.Message{
 				Type:      common.TypeAck,
 				Sender:    c.nickname,
@@ -434,8 +439,8 @@ func (c *Connection) sendMessage(msg *common.Message) error {
 	return err
 }
 
-// registerIncomingTransfer zapisuje metadane transferu przychodzącego,
-// zanim dotrą jego fragmenty.
+// registerIncomingTransfer records the metadata of an incoming transfer before its
+// chunks arrive.
 func (c *Connection) registerIncomingTransfer(msg *common.Message) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
@@ -474,17 +479,17 @@ func (c *Connection) handleFileChunk(ctx context.Context, msg *common.Message) {
 
 	// Store chunk with transfer-specific lock
 	transfer.mutex.Lock()
-	// Fragment może dotrzeć, zanim zdążyliśmy przetworzyć wiadomość inicjującą.
+	// A chunk may arrive before we have processed the init message.
 	if transfer.TotalChunks == 0 && msg.TotalChunks > 0 {
 		transfer.TotalChunks = msg.TotalChunks
 	}
 	transfer.Chunks[msg.ChunkNum] = msg.Data
-	// Zabezpieczenie przed dzieleniem przez zero (dawało +Inf w komunikacie).
+	// Guard against division by zero (it produced +Inf in the message).
 	if transfer.TotalChunks > 0 {
 		transfer.Progress = float64(len(transfer.Chunks)) / float64(transfer.TotalChunks) * 100
 	}
-	// Progress i Filename też są chronione tą blokadą, więc odczytujemy je
-	// wewnątrz sekcji krytycznej, a nie po Unlock.
+	// Progress and Filename are guarded by this lock too, so read them inside the
+	// critical section rather than after Unlock.
 	progress := transfer.Progress
 	filename := transfer.Filename
 	transfer.mutex.Unlock()
@@ -502,8 +507,8 @@ func (c *Connection) handleFileChunk(ctx context.Context, msg *common.Message) {
 		return
 	}
 
-	// Zakończenie sygnalizuje SERWER (TypeFileComplete). Wcześniej klient
-	// dokładał własny komunikat, więc plik był "odbierany" dwa razy - za drugim
-	// razem rekord transferu już nie istniał i użytkownik widział mylące
+	// Completion is signalled by the SERVER (TypeFileComplete). The client used to
+	// add its own message as well, so a file was "received" twice - the second time
+	// the transfer record no longer existed and the user saw a confusing
 	// "Error saving file: file transfer not found".
 }

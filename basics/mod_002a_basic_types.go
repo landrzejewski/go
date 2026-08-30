@@ -334,7 +334,8 @@ func m002aStrings() {
 	// --- Bytes, not characters ---
 	polish := "Zażółć gęślą jaźń"
 	fmt.Printf("%q: len=%d bytes but %d runes\n", polish, len(polish), utf8.RuneCountInString(polish))
-	fmt.Printf("polish[1] = %d - a fragment of a two-byte rune, not 'a'\n", polish[1])
+	fmt.Printf("polish[1] = %d - plain ASCII 'a', one byte\n", polish[1])
+	fmt.Printf("polish[2] = %d - the FIRST byte of the two-byte rune 'ż', not a character\n", polish[2])
 
 	// A string need not be valid UTF-8.
 	invalid := string([]byte{0xff, 0xfe, 0x41})
@@ -348,8 +349,8 @@ func m002aStrings() {
 
 	// --- Slicing is by byte and is O(1) ---
 	fmt.Printf("s[7:14] = %q (byte range, shares memory, no copy)\n", s[7:14])
-	fmt.Printf("cutting a rune in half: %q -> %q (invalid UTF-8, no panic)\n",
-		polish[:3], polish[:2])
+	fmt.Printf("cutting a rune in half: %q is valid, %q is not (still no panic)\n",
+		polish[:2], polish[:3])
 
 	// --- Building strings ---
 	var sb strings.Builder

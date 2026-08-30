@@ -9,37 +9,37 @@ import (
 	"sync"
 )
 
-// FindFiles buduje potok (pipeline) z trzech etapów:
+// FindFiles builds a three-stage pipeline:
 //
 //	findFiles -> filterByExtension -> filterByContent
 //
-// Zasada, którą pokazuje ten przykład: kanał zamyka WYŁĄCZNIE nadawca i tylko
-// wtedy, gdy jest jedynym nadawcą. Kiedy nadawców jest wielu (tutaj dwie
-// goroutines wołające findFiles), czekamy na nich przez sync.WaitGroup
-// i zamykamy kanał dopiero po ich zakończeniu.
+// The rule this example demonstrates: ONLY the sender closes a channel, and only
+// when it is the sole sender. When there are several senders (here: two goroutines
+// calling findFiles) we wait for them with a sync.WaitGroup and close the channel
+// only once they have all finished.
 func FindFiles() {
 	files := make(chan string, 10)
 	filesWithExtension := make(chan string)
 	filesWithContent := make(chan string)
 
-	// Etap 1: dwóch nadawców pisze do tego samego kanału, więc żaden z nich
-	// nie może go zamknąć samodzielnie - robi to osobna goroutine po wg.Wait().
+	// Stage 1: two senders write to the same channel, so neither may close it on
+	// its own - a separate goroutine does that after wg.Wait().
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		findFiles("./common", files)
+		findFiles("./examples/common", files)
 	}()
 	go func() {
 		defer wg.Done()
-		findFiles("./concurrency", files)
+		findFiles("./examples/concurrency", files)
 	}()
 	go func() {
 		wg.Wait()
 		close(files)
 	}()
 
-	// Etapy 2 i 3: każdy ma dokładnie jednego nadawcę, więc zamyka swój kanał sam.
+	// Stages 2 and 3: each has exactly one sender, so each closes its own channel.
 	go func() {
 		defer close(filesWithExtension)
 		filterByExtension(files, filesWithExtension, ".go")
@@ -49,7 +49,7 @@ func FindFiles() {
 		filterByContent(filesWithExtension, filesWithContent, "package concurrency")
 	}()
 
-	// Pętla kończy się, gdy ostatni etap zamknie kanał - bez sztucznego timeoutu.
+	// The loop ends when the last stage closes its channel - no artificial timeout.
 	for file := range filesWithContent {
 		fmt.Println(file)
 	}
@@ -65,10 +65,10 @@ func findFiles(path string, files chan<- string) {
 		}
 		return nil
 	})
-	// panic w goroutine ubija cały proces i nie da się go przechwycić
-	// w funkcji wywołującej - logujemy i kończymy tylko ten etap.
+	// A panic in a goroutine takes down the whole process and cannot be recovered
+	// by the caller - so we log and end just this stage.
 	if err != nil {
-		log.Printf("Błąd przeszukiwania %s: %v", path, err)
+		log.Printf("error walking %s: %v", path, err)
 	}
 }
 

@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"sort"
 	"strings"
 )
@@ -263,7 +262,9 @@ func m008TypeAssertions() {
 		m005CatchPanic(func() { _ = x.(int) }))
 
 	// --- Asserting to an INTERFACE discovers optional behaviour ---
-	for _, w := range []io.Writer{&bytes.Buffer{}, os.Stdout} {
+	// *os.File has implemented io.ReaderFrom since Go 1.15, so pair *bytes.Buffer
+	// with something that genuinely does not: *strings.Builder only has Write.
+	for _, w := range []io.Writer{&bytes.Buffer{}, &strings.Builder{}} {
 		if _, ok := w.(io.ReaderFrom); ok {
 			fmt.Printf("  %-16T also implements io.ReaderFrom (io.Copy takes a fast path)\n", w)
 		} else {
@@ -524,8 +525,11 @@ func m008StdlibInterfaces() {
 	fmt.Println("  inside String(), convert to the underlying type or the verb recurses forever")
 
 	// TextMarshaler - one method pair, three encodings.
-	encoded, _ := json.Marshal(map[string]m008Temperature{"outside": t})
-	fmt.Printf("  encoding.TextMarshaler powers JSON values AND map keys: %s\n", encoded)
+	encodedValue, _ := json.Marshal(map[string]m008Temperature{"outside": t})
+	fmt.Printf("  encoding.TextMarshaler powers JSON values: %s\n", encodedValue)
+	// A map KEY must encode to a string, and TextMarshaler is what supplies it.
+	encodedKey, _ := json.Marshal(map[m008Temperature]string{t: "outside"})
+	fmt.Printf("  ...and JSON map keys, via the same method: %s\n", encodedKey)
 	var parsed m008Temperature
 	_ = parsed.UnmarshalText([]byte("18.0°C"))
 	fmt.Printf("  TextUnmarshaler round-trip: %v\n", parsed)

@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"tcp-chat/common"
+	"training.pl/go/examples/chat/common"
 )
 
 // Client represents a connected client
@@ -17,22 +17,22 @@ type Client struct {
 	SendChan chan *common.Message
 	Server   *Server
 
-	// RemoteAddr jest ustawiane raz, przed startem pomp, i dalej tylko czytane.
+	// RemoteAddr is set once, before the pumps start, and only read afterwards.
 	RemoteAddr string
 
-	// Nickname, Status i Rooms są czytane przez goroutines INNYCH klientów
-	// (BroadcastMessage, BroadcastUserList), więc dostęp wyłącznie przez
-	// metody GetNickname/SetNickname, GetStatus/SetStatus itd.
+	// Nickname, Status and Rooms are read by the goroutines of OTHER clients
+	// (BroadcastMessage, BroadcastUserList), so access them only through
+	// the GetNickname/SetNickname, GetStatus/SetStatus accessors.
 	Nickname string
 	Status   common.UserStatus
 	Rooms    map[string]bool
 	mutex    sync.RWMutex
 
-	// done zamiast zamykania SendChan. Kanał wysyłkowy zamyka się tylko po
-	// stronie NADAWCY, a nadawców jest tu wielu (każdy klient rozgłaszający
-	// wiadomość). Zamykanie go w Close() powodowało panikę "send on closed
-	// channel", która ubijała cały serwer - select z default chroni wyłącznie
-	// przed pełnym kanałem, nie przed zamkniętym.
+	// done instead of closing SendChan. A send channel is closed only by the
+	// SENDER, and here there are many senders (every client broadcasting a
+	// message). Closing it in Close() caused a "send on closed channel" panic that
+	// took down the whole server - a select with default guards only against a
+	// full channel, not a closed one.
 	done      chan struct{}
 	closeOnce sync.Once
 }
@@ -100,8 +100,9 @@ func (c *Client) IsInRoom(roomID string) bool {
 }
 
 // SendMessage sends a message to the client.
-// Kanał nigdy nie jest zamykany, więc wysyłka nie może zapanikować; zakończonego
-// klienta rozpoznajemy po zamkniętym done.
+//
+// The channel is never closed, so a send cannot panic; a finished client is
+// recognised by its closed done channel.
 func (c *Client) SendMessage(msg *common.Message) {
 	select {
 	case <-c.done:
@@ -109,9 +110,12 @@ func (c *Client) SendMessage(msg *common.Message) {
 	default:
 	}
 
+	// No `case <-c.done` here: with a default branch present it would be
+	// unreachable, because default is taken as soon as the send would block. The
+	// policy is deliberately "drop when the buffer is full" - a slow client must
+	// not stall whoever is broadcasting.
 	select {
 	case c.SendChan <- msg:
-	case <-c.done:
 	default:
 		log.Printf("Client %s send channel full, dropping message", c.GetNickname())
 	}
@@ -125,8 +129,8 @@ func (c *Client) ReadPump() {
 	}()
 
 	scanner := bufio.NewScanner(c.Conn)
-	// Domyślny limit bufio.Scanner to 64 KiB na token - podnosimy go do stałej
-	// współdzielonej z klientem, zamiast wpisywać rozmiar na sztywno.
+	// bufio.Scanner defaults to 64 KiB per token - raise it to the constant shared
+	// with the client instead of hardcoding a size here.
 	scanner.Buffer(make([]byte, 0, 64*1024), common.MaxScannerBuffer)
 
 	for scanner.Scan() {
@@ -135,7 +139,7 @@ func (c *Client) ReadPump() {
 		data := scanner.Bytes()
 		msg, err := common.DecodeMessage(data)
 		if err != nil {
-			log.Printf("Error decoding message from %s: %v", c.Nickname, err)
+			log.Printf("Error decoding message from %s: %v", c.GetNickname(), err)
 			continue
 		}
 
@@ -206,9 +210,9 @@ func (c *Client) WritePump() {
 }
 
 // Start begins the client's read and write pumps
-// Start uruchamia obie pompy i BLOKUJE do ich zakończenia, dzięki czemu
-// wywołujący (handleNewConnection) wie, kiedy połączenie faktycznie się
-// skończyło, i może wtedy zwolnić slot w limiterze.
+// Start runs both pumps and BLOCKS until they finish, so the caller
+// (handleNewConnection) knows when the connection has really ended and can release
+// its slot in the rate limiter at that point.
 func (c *Client) Start() {
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -223,10 +227,10 @@ func (c *Client) Start() {
 	wg.Wait()
 }
 
-// Close sygnalizuje zakończenie i zamyka połączenie. Idempotentne dzięki
-// sync.Once - Close bywa wołane i z ReadPump, i z handleShutdown.
-// Nie zamykamy SendChan: zrobiłby to odbiorca, a nadawcy (inni klienci)
-// zapanikowaliby przy próbie wysyłki.
+// Close signals completion and closes the connection. It is idempotent thanks to
+// sync.Once - Close is called both from ReadPump and from handleShutdown.
+// SendChan is deliberately not closed: that would be the receiver closing it, and
+// the senders (other clients) would panic on their next send.
 func (c *Client) Close() {
 	c.closeOnce.Do(func() {
 		close(c.done)

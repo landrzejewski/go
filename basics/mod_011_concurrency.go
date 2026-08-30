@@ -25,7 +25,7 @@ signal, and a **mutex** to protect a small piece of shared state.
 pieces; parallelism is running them simultaneously. Go gives you the first, and `GOMAXPROCS` decides
 how much of the second you get.
 
-This module is the language-level tour. The `concurrency/` package in this repository holds the
+This module is the language-level tour. The `examples/concurrency/` package in this repository holds the
 worked exercises: `barbers.go` (the sleeping barber), `barrier.go`, `semaphore.go`,
 `producer_consumer_*.go` and `find_files.go` (a three-stage pipeline).
 */
@@ -39,7 +39,7 @@ worked exercises: `barbers.go` (the sleeping barber), `barrier.go`, `semaphore.g
 
 - `go f()` starts `f` in a new **goroutine** and returns immediately. The arguments are evaluated
   **at the `go` statement**, in the current goroutine — the same rule as `defer`.
-- A goroutine is not an OS thread. It starts with about **8 KB of stack** that grows and shrinks on
+- A goroutine is not an OS thread. It starts with just **2 KB of stack** that grows and shrinks on
   demand, and the runtime multiplexes many goroutines onto few threads (the *M:N* scheduler).
   Hundreds of thousands of goroutines is ordinary; hundreds of thousands of threads is not.
 - The scheduler is **preemptive** since Go 1.14: a goroutine can be interrupted even in a tight loop
@@ -103,7 +103,7 @@ func m011Goroutines() {
 		wg4.Go(func() { counter.Add(1) })
 	}
 	wg4.Wait()
-	fmt.Printf("  %d goroutines started and finished in %v (peak count %d)\n",
+	fmt.Printf("  %d goroutines started and finished in %v (all %d ran)\n",
 		many, time.Since(start).Round(time.Microsecond), counter.Load())
 
 	// --- Each goroutine needs its own recover ---
@@ -383,7 +383,7 @@ func m011Merge[T any](ch1, ch2 <-chan T) <-chan T {
 - **`sync.Once`** — run something exactly once. **`sync.OnceValue[T]` / `OnceValues`** (Go 1.21) are
   the generic versions and are usually nicer (module 010, Section 9).
 - **`sync.Cond`** — wait for a condition. Rarely needed; a channel usually expresses the same thing
-  more clearly. This repo's `concurrency/barrier.go` and `semaphore.go` use it deliberately, to show
+  more clearly. This repo's `examples/concurrency/barrier.go` and `semaphore.go` use it deliberately, to show
   the classic form.
 - **`sync.Pool`** — a free list of temporary objects to reduce allocation pressure. Its contents can
   vanish at any GC. Only use it after profiling shows allocation is the bottleneck.
@@ -391,9 +391,10 @@ func m011Merge[T any](ch1, ch2 <-chan T) <-chan T {
   times, or disjoint key sets per goroutine. For anything else a plain map plus a `RWMutex` is
   faster and clearer.
 - **`sync/atomic`** — lock-free operations on a single word. Prefer the **typed** wrappers added in
-  Go 1.19 (`atomic.Int64`, `atomic.Bool`, `atomic.Pointer[T]`, `atomic.Value`) over the older
-  free functions: they cannot be accidentally accessed non-atomically, and their zero value is
-  ready to use.
+  Go 1.19 (`atomic.Int64`, `atomic.Bool`, `atomic.Pointer[T]`) over the older free functions: they
+  cannot be accidentally accessed non-atomically, and their zero value is ready to use. Note that
+  `atomic.Value` is *not* one of them — it dates back to Go 1.4 and is the untyped, `any`-based
+  predecessor that `atomic.Pointer[T]` replaced.
 - **The race detector** (`go test -race`, `go run -race`) is the only reliable way to find data
   races. It has real overhead (roughly 2-20×) but it finds bugs that no amount of reading will.
   Run your tests with it in CI.
@@ -597,12 +598,12 @@ func m011HandleRequest(ctx context.Context) string {
   service imposes a rate limit. Do **not** start an unbounded goroutine per item.
 - **Pipeline** — a chain of stages, each a function taking a receive-only channel and returning
   another. Each stage owns its output channel and closes it when done. This repo's
-  `concurrency/find_files.go` is a three-stage example: walk, filter by extension, filter by
+  `examples/concurrency/find_files.go` is a three-stage example: walk, filter by extension, filter by
   content.
 - **Fan-out** — several goroutines reading the same channel. **Fan-in** — merging several channels
   into one, which is the `m011Merge` from Section 3.
 - **Semaphore** — a buffered channel used as a counting semaphore: acquire by sending, release by
-  receiving. `concurrency/semaphore.go` shows the `sync.Cond` version of the same idea.
+  receiving. `examples/concurrency/semaphore.go` shows the `sync.Cond` version of the same idea.
 - **Every pattern needs a cancellation story.** A stage that blocks sending into a full downstream
   channel after the consumer has gone away is a leak. Give every stage a `ctx` and a
   `case <-ctx.Done(): return`.
@@ -692,7 +693,7 @@ func m011Patterns() {
 		taken, runtime.NumGoroutine())
 
 	fmt.Println("  golang.org/x/sync/errgroup wraps all of this: shared ctx, first error wins")
-	fmt.Println("  see concurrency/find_files.go for a real three-stage pipeline")
+	fmt.Println("  see examples/concurrency/find_files.go for a real three-stage pipeline")
 }
 
 func m011Generate(ctx context.Context, from, to int) <-chan int {

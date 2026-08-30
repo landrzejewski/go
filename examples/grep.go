@@ -3,6 +3,7 @@ package examples
 import (
 	"bufio"
 	"fmt"
+	"io/fs"
 	"log"
 	"os"
 	"path/filepath"
@@ -16,39 +17,45 @@ func Grep() {
 
 	pattern, err := regexp.Compile(os.Args[1])
 	if err != nil {
-		log.Fatalf("Niepoprawne wyrażenie regularne %q: %v", os.Args[1], err)
+		log.Fatalf("invalid regular expression %q: %v", os.Args[1], err)
 	}
 
 	path := os.Args[2]
 
-	// Przekazujemy *regexp.Regexp, a nie kopię wartości: kopiowanie Regexp jest
-	// odradzane (unieważnia wewnętrzny cache automatu dopasowania - z tego
-	// powodu Regexp.Copy zostało oznaczone jako deprecated w Go 1.12).
-	if err := filepath.Walk(path, search(pattern)); err != nil {
+	// We pass a *regexp.Regexp, not a copy of the value: copying a Regexp is
+	// discouraged (it invalidates the internal match-automaton cache - which is
+	// why Regexp.Copy was deprecated in Go 1.12).
+	//
+	// WalkDir rather than Walk: recommended since Go 1.16, because the callback
+	// receives an fs.DirEntry instead of an fs.FileInfo and so avoids a stat(2)
+	// call per entry.
+	if err := filepath.WalkDir(path, search(pattern)); err != nil {
 		log.Fatalf("Error walking on path %s: %v", path, err)
 	}
 }
 
-func search(pattern *regexp.Regexp) filepath.WalkFunc {
-	return func(path string, info os.FileInfo, err error) error {
+func search(pattern *regexp.Regexp) fs.WalkDirFunc {
+	return func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
-			return err
+			// Skip what we cannot read rather than aborting the whole walk.
+			log.Printf("skipping %q: %v", path, err)
+			return nil
 		}
-		if !info.Mode().IsRegular() {
+		if !entry.Type().IsRegular() {
 			return nil
 		}
 		file, err := os.Open(path)
 		if err != nil {
-			// log.Fatalf tutaj wywoływało os.Exit(1): pomijało wszystkie defery
-			// (w tym zamknięcie pliku), czyniło poniższy return martwym kodem
-			// i przerywało cały przebieg z powodu jednego nieczytelnego pliku.
-			// Zwracamy nil, żeby pominąć plik i iść dalej.
-			log.Printf("Pomijam %q: %v", path, err)
+			// log.Fatalf here used to call os.Exit(1): it skipped every defer
+			// (including closing the file), made the return below dead code, and
+			// aborted the entire run because of one unreadable file. Return nil
+			// to skip the file and keep going.
+			log.Printf("skipping %q: %v", path, err)
 			return nil
 		}
 		defer func() {
 			if err := file.Close(); err != nil {
-				log.Printf("Błąd zamykania %q: %v", path, err)
+				log.Printf("error closing %q: %v", path, err)
 			}
 		}()
 
@@ -61,11 +68,11 @@ func search(pattern *regexp.Regexp) filepath.WalkFunc {
 				fmt.Printf("%s (line: %d): %s\n", path, lineNumber, line)
 			}
 		}
-		// Wcześniej było tu `return err` - ale err to parametr WalkFunc,
-		// nadpisany przez os.Open powyżej i w tym miejscu zawsze nil, więc
-		// funkcja tylko udawała, że propaguje błędy. Właściwy błąd pochodzi
-		// ze skanera (I/O albo wiersz dłuższy niż 64 KiB - łatwe do trafienia
-		// w pliku binarnym).
+		// This used to be `return err` - but err is the WalkDirFunc parameter,
+		// shadowed by os.Open above and always nil at this point, so the function
+		// only pretended to propagate errors. The real error comes from the
+		// scanner (I/O, or a line longer than 64 KiB - easy to hit in a binary
+		// file).
 		return scanner.Err()
 	}
 }

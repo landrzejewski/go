@@ -5,30 +5,38 @@ import (
 	"fmt"
 )
 
-// monetaryAmount przechowuje kwotę w JEDNOSTKACH MINOROWYCH (groszach,
-// centach) jako liczbę całkowitą - nigdy jako float64.
+// monetaryAmount stores the value in MINOR UNITS (grosze, cents) as an integer -
+// never as a float64.
 //
-// Dlaczego: binarny float nie potrafi dokładnie reprezentować 0.01, 0.10 czy
-// 0.20 (klasyczne 0.1 + 0.2 != 0.3). Przy sumowaniu księgi błędy się kumulują,
-// a formatowanie %.2f je maskuje - saldo cicho odjeżdża od prawdy.
-// Alternatywa dla poważniejszych zastosowań: pakiet shopspring/decimal.
+// Why: a binary float cannot represent 0.01, 0.10 or 0.20 exactly (the classic
+// 0.1 + 0.2 != 0.3). Summing a ledger accumulates those errors, and %.2f
+// formatting hides them - the balance quietly drifts away from the truth.
+// For anything more serious, use a decimal package such as shopspring/decimal.
 type monetaryAmount struct {
 	minorUnits int64 // np. 12345 == 123,45 PLN
 	currency   string
 }
 
-// Konwencja Go: wartownicze błędy nazywamy Err..., żeby wywołujący mógł
-// porównać je przez errors.Is. errors.New, bo nie ma tu żadnych weryfikatorów
-// formatu (poprzednio było fmt.Errorf i literówka "currnency").
+// Go convention: sentinel errors are named Err... so callers can test them with
+// errors.Is. errors.New here because there is nothing to interpolate (an earlier
+// version used fmt.Errorf and carried the typo "currnency").
 var ErrCurrencyMismatch = errors.New("currency mismatch")
 
-// newMonetaryAmount przyjmuje jednostki główne i minorowe, np. (123, 45, "PLN").
+// newMonetaryAmount takes major and minor units, e.g. (123, 45, "PLN") for 123.45.
+//
+// The minor part is always added in the direction of the major part's sign,
+// so (-1, 50, "PLN") is -1.50 and not -0.50. Writing units*100+minorUnits
+// would get every negative amount wrong.
 func newMonetaryAmount(units, minorUnits int64, currency string) *monetaryAmount {
-	return &monetaryAmount{units*100 + minorUnits, currency}
+	total := units*100 + minorUnits
+	if units < 0 {
+		total = units*100 - minorUnits
+	}
+	return &monetaryAmount{total, currency}
 }
 
-// String sprawia, że typ sam wie, jak się wypisać - bez tego fmt.Println
-// drukowałby surowe &{12345 PLN}.
+// String lets the type print itself - without it fmt.Println would show the raw
+// &{12345 PLN}.
 func (ma *monetaryAmount) String() string {
 	sign := ""
 	value := ma.minorUnits
@@ -40,22 +48,29 @@ func (ma *monetaryAmount) String() string {
 }
 
 func (ma *monetaryAmount) add(amount *monetaryAmount) error {
-	return apply(ma, amount, func(monetaryAmount, otherMonetaryAmount *monetaryAmount) {
-		monetaryAmount.minorUnits += otherMonetaryAmount.minorUnits
-	})
+	if err := ma.checkCurrency(amount); err != nil {
+		return err
+	}
+	ma.minorUnits += amount.minorUnits
+	return nil
 }
 
 func (ma *monetaryAmount) subtract(amount *monetaryAmount) error {
-	return apply(ma, amount, func(monetaryAmount, otherMonetaryAmount *monetaryAmount) {
-		monetaryAmount.minorUnits -= otherMonetaryAmount.minorUnits
-	})
+	if err := ma.checkCurrency(amount); err != nil {
+		return err
+	}
+	ma.minorUnits -= amount.minorUnits
+	return nil
 }
 
-func apply(monetaryAmount, otherMonetaryAmount *monetaryAmount, operator func(monetaryAmount, otherMonetaryAmount *monetaryAmount)) error {
-	if monetaryAmount.currency != otherMonetaryAmount.currency {
+// checkCurrency is the one rule both operations share. An earlier version routed
+// both through an apply(a, b, operator func(...)) helper, but the callback bought
+// nothing over two three-line methods - and its parameters were named after the
+// type, shadowing monetaryAmount inside the function.
+func (ma *monetaryAmount) checkCurrency(other *monetaryAmount) error {
+	if ma.currency != other.currency {
 		return ErrCurrencyMismatch
 	}
-	operator(monetaryAmount, otherMonetaryAmount)
 	return nil
 }
 
@@ -63,15 +78,15 @@ func MonetaryAmount() {
 	amount := newMonetaryAmount(0, 10, "PLN")      // 0,10 PLN
 	otherAmount := newMonetaryAmount(0, 20, "PLN") // 0,20 PLN
 
-	// Na float64 ta suma dałaby 0.30000000000000004.
+	// On float64 this sum would come out as 0.30000000000000004.
 	if err := amount.add(otherAmount); err != nil {
 		fmt.Printf("Error: %v\n", err)
 		return
 	}
 	fmt.Println(amount) // 0.30 PLN
 
-	// Operacja na różnych walutach zwraca błąd, a nie panikuje.
+	// Mixing currencies returns an error rather than panicking.
 	if err := amount.add(newMonetaryAmount(1, 0, "EUR")); errors.Is(err, ErrCurrencyMismatch) {
-		fmt.Println("Nie można dodać EUR do PLN:", err)
+		fmt.Println("cannot add EUR to PLN:", err)
 	}
 }

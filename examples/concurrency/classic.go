@@ -46,9 +46,9 @@ func Run() {
 
 func increment(wg *sync.WaitGroup, mutex *sync.Mutex) {
 	defer wg.Done()
-	// Idiom: najpierw Lock, dopiero potem defer Unlock. Odwrotna kolejność
-	// działa tu przypadkiem, ale każdy return/panic wstawiony pomiędzy
-	// defer a Lock daje "fatal error: sync: unlock of unlocked mutex".
+	// Idiom: Lock first, and only then defer Unlock. The reverse order happens to
+	// work here, but any return or panic inserted between the defer and the Lock
+	// gives "fatal error: sync: unlock of unlocked mutex".
 	mutex.Lock()
 	defer mutex.Unlock()
 	counter += 1
@@ -102,7 +102,7 @@ func Run() {
 var (
 	money = 100
 	mutex = sync.Mutex{}
-	// Nazwa opisuje faktyczny predykat z pętli Wait poniżej: money-spendValue >= 10.
+	// The name describes the real predicate of the Wait loop below: money-spendValue >= 10.
 	enoughMoney = sync.NewCond(&mutex)
 	spendValue  = 10
 )
@@ -126,9 +126,11 @@ func work() {
 		mutex.Lock()
 		money += 5
 		fmt.Println("New income, current value:", money)
-		//enoughMoney.Broadcast() // budzi wszystkie czekające goroutines
-		// Signal budzi JEDNĄ czekającą goroutine - tę czekającą najdłużej
-		// (runtime używa kolejki FIFO), a nie losową. I goroutine, nie wątek.
+		//enoughMoney.Broadcast() // wakes every waiting goroutine
+		// Signal wakes ONE goroutine waiting on the condition - a goroutine, not an OS
+		// thread. WHICH one is deliberately unspecified: the docs promise only "wakes one
+		// goroutine waiting on c, if there is any". The current runtime happens to use a
+		// FIFO notify list, but that is an implementation detail - never rely on it.
 		enoughMoney.Signal()
 		mutex.Unlock()
 		time.Sleep(1 * time.Millisecond)
@@ -141,8 +143,8 @@ func Run() {
 	go spend()
 
 	time.Sleep(10 * time.Second)
-	// money jest chronione mutexem, więc także odczyt musi być pod blokadą -
-	// time.Sleep nie jest prymitywem synchronizacji.
+	// money is guarded by the mutex, so reading it must take the lock too -
+	// time.Sleep is not a synchronisation primitive.
 	mutex.Lock()
 	currentMoney := money
 	mutex.Unlock()
@@ -188,6 +190,7 @@ func Run() {
 	fmt.Println("Done")
 }
 */
+// Further reading on detecting the deadlock above:
 // https://dev.to/ietxaniz/go-deadlock-detection-delock-library-1eig
 
 /*
@@ -199,8 +202,8 @@ var (
 
 func spend() {
 	for i := 1; i < 500; i++ {
-		// AddInt64 zwraca nową wartość - używamy jej zamiast czytać `money`
-		// zwykłym odczytem, który byłby wyścigiem (go run -race to zgłasza).
+		// AddInt64 returns the new value - we use it instead of reading `money` with
+		// a plain load, which would be a data race (go run -race reports it).
 		current := atomic.AddInt64(&money, int64(-value))
 		fmt.Println("Spend: ", current)
 		time.Sleep(1 * time.Millisecond)
@@ -222,12 +225,12 @@ func Run() {
 	go spend()
 
 	time.Sleep(10 * time.Second)
-	// Odczyt zmiennej zapisywanej atomowo też musi być atomowy.
+	// A variable written atomically must be read atomically too.
 	fmt.Println("Current value:", atomic.LoadInt64(&money))
 }
 
-// Idiom dla Go 1.19+: typ atomic.Int64 zamiast funkcji atomic.*Int64 na
-// surowej zmiennej - nie da się wtedy przypadkiem odczytać jej nieatomowo:
+// The Go 1.19+ idiom: the atomic.Int64 type instead of the atomic.*Int64
+// functions on a raw variable - then it cannot accidentally be read non-atomically:
 //
 //	var money atomic.Int64
 //	money.Store(100)
@@ -258,10 +261,10 @@ func Run() {
 // Semaphore
 func Run() {
 	semaphore := NewSemaphore(5)
-	// UWAGA: od Go 1.22 zmienna pętli ma zakres pojedynczej iteracji, więc
-	// przechwycenie `i` w goroutine poniżej jest POPRAWNE - każda dostanie
-	// własną wartość. We wcześniejszych wersjach wszystkie widziałyby 100
-	// i trzeba było przekazywać i jako argument funkcji.
+	// NOTE: since Go 1.22 the loop variable is scoped to one iteration, so
+	// capturing `i` in the goroutine below is CORRECT - each gets its own
+	// value. In earlier versions they would all have seen 100 and you had to
+	// pass i as a function argument.
 	for i := 0; i < 100; i++ {
 		go func() {
 			semaphore.Acquire()

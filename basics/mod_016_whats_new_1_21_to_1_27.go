@@ -137,9 +137,10 @@ matching.
 func m016Go122() {
 	fmt.Println("\n--- Section 2: Go 1.22 ---")
 
-	// The loop variable fix.
+	// The loop variable fix. Note the three-clause form: `for i := range 3` is itself
+	// a Go 1.22 addition, so it never had the old behaviour to begin with.
 	var closures []func() int
-	for i := range 3 {
+	for i := 0; i < 3; i++ {
 		closures = append(closures, func() int { return i })
 	}
 	got := make([]int, 0, 3)
@@ -163,8 +164,10 @@ func m016Go122() {
 
 	// math/rand/v2.
 	r := rand.New(rand.NewPCG(42, 1024)) // deterministic, for reproducible output here
+	// rand.N here is the PACKAGE-level generic function, which is what 1.22 shipped.
+	// The (*Rand).N method is a Go 1.27 addition - see Section 7.
 	fmt.Printf("  math/rand/v2: IntN(100)=%d Float64()=%.4f N[int64](1000)=%d\n",
-		r.IntN(100), r.Float64(), r.N(int64(1000)))
+		r.IntN(100), r.Float64(), rand.N(int64(1000)))
 	fmt.Println("    v2 removed Seed and Read, uses PCG/ChaCha8, and has no global lock")
 
 	// slices.Concat and cmp.Or.
@@ -206,7 +209,8 @@ func m016Go122() {
 ### Toolchain
 
   - **Telemetry**, opt-in via `go telemetry on`.
-  - `go build -cover` for coverage of whole programs, not just tests.
+  - **Telemetry** is the toolchain headline here; `go build -cover` for whole-program coverage
+    had already arrived back in Go 1.20.
 
 **What to stop writing**: callback-based iteration (`ForEach(func(v T) bool)`), a goroutine plus a
 channel just to produce a sequence, and `maps.Keys` expecting a slice.
@@ -360,7 +364,8 @@ type m016Payload struct{ Name string }
   - **Container-aware `GOMAXPROCS`**: the runtime now reads the cgroup CPU limit, so a pod limited
     to 2 CPUs on a 64-core node no longer sets `GOMAXPROCS` to 64. It also updates it when the limit
     changes. This fixed a great deal of accidental over-parallelism in Kubernetes.
-  - The **Green Tea garbage collector**: better scanning locality, 10-40% less GC overhead on
+  - The **Green Tea garbage collector** (opt-in here via `GOEXPERIMENT=greenteagc`, the default
+    only from Go 1.26): better scanning locality, 10-40% less GC overhead on
     workloads with many small objects. No API change.
   - `go doc -http` serves documentation locally in a browser.
 
@@ -398,6 +403,7 @@ func m016Go125() {
 	fmt.Printf("  GOMAXPROCS=%d on a %d-CPU machine\n", runtime.GOMAXPROCS(0), runtime.NumCPU())
 	fmt.Println("    since 1.25 this reads the cgroup CPU limit, and updates when it changes")
 	fmt.Println("  the Green Tea GC: 10-40% less GC overhead on many-small-object workloads")
+	fmt.Println("    (GOEXPERIMENT=greenteagc in 1.25; on by default from 1.26)")
 
 	// synctest.
 	fmt.Println("  testing/synctest: a fake clock and deterministic scheduling for tests")
@@ -504,9 +510,10 @@ The current release, and the one with the largest language change since generics
     standard library has `slices.SortFunc(s, f)` rather than `s.SortFunc(f)`. The restriction that
     remains: **a generic method cannot satisfy an interface**, because an interface method has one
     signature and a generic method has infinitely many (module 010, Section 8).
-  - **Function type inference in all assignment contexts.** A generic function can now be passed as
-    an argument, returned, or stored in a struct field or map value without explicit instantiation.
-    Go 1.21 allowed it only when assigning to a variable of function type.
+  - **Function type inference in all assignment contexts.** A generic function can now be
+    returned, or stored in a struct field or map value, without explicit instantiation. Go 1.21
+    had already covered assigning to a func-typed variable and passing as an argument; 1.27
+    generalises those into one assignability rule.
   - **A struct-literal key may be any valid field selector**, including a **promoted** field from an
     embedded struct: `Line{name: "diagonal"}` where `name` comes from an embedded `Object`
     (module 002b, Section 12).
@@ -671,7 +678,7 @@ func m016CumulativePicture() {
 	fmt.Println()
 	fmt.Println("  the two that cost nothing to adopt, because they needed no code change at all:")
 	fmt.Println("    the loop-variable fix (1.22) made existing code CORRECT")
-	fmt.Println("    Swiss-table maps (1.24) and the Green Tea GC (1.25) made it FASTER")
+	fmt.Println("    Swiss-table maps (1.24) and the Green Tea GC (default from 1.26) made it FASTER")
 	fmt.Println()
 	fmt.Printf("  this module was compiled and run by %s\n", runtime.Version())
 	fmt.Printf("  at %s\n", time.Now().Format(time.RFC3339))

@@ -7,8 +7,8 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"tcp-chat/common"
 	"time"
+	"training.pl/go/examples/chat/common"
 )
 
 var logFile *os.File
@@ -50,14 +50,14 @@ func main() {
 				Sender:  *nickname,
 				Content: "Client shutting down",
 			}
-			// Wysyłka nieblokująca: jeśli writePump już się zakończył, a bufor
-			// jest pełny, gołe `conn.sendChan <- msg` zawiesiłoby Ctrl-C.
+			// Non-blocking send: if writePump has already finished and the buffer
+			// is full, a bare `conn.sendChan <- msg` would hang Ctrl-C.
 			select {
 			case conn.sendChan <- disconnectMsg:
 				// Give message time to send
 				time.Sleep(100 * time.Millisecond)
 			case <-time.After(time.Second):
-				fmt.Println("Nie udało się wysłać komunikatu rozłączenia")
+				fmt.Println("could not send the disconnect message")
 			}
 		}
 

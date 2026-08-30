@@ -20,8 +20,11 @@ func addFloat(a, b float64) float64 {
 	return a + b
 }*/
 
+// The ~ prefix means "any type whose UNDERLYING type is this". Without it the
+// constraint accepts only int, float64 and uint exactly, and rejects defined types
+// such as `type Celsius float64`.
 type number interface {
-	int | float64 | uint
+	~int | ~float64 | ~uint
 }
 
 func Add[T number](a, b T) T {

@@ -183,8 +183,9 @@ func (d m001bWeekday) String() string {
 }
 
 // Byte sizes: the whole expression repeats, so the shift grows with iota.
-type m001bByteSize float64
-
+// Note these constants are deliberately left UNTYPED, so they can be used wherever
+// a numeric type is expected. Giving them a defined type would force a conversion
+// at every use - see the float64() calls that would otherwise not be needed.
 const (
 	_       = iota             // skip 0; the line still advances iota
 	m001bKB = 1 << (10 * iota) // 1 << 10
@@ -235,8 +236,10 @@ func m001bIotaAndEnums() {
 	fmt.Println("an enum is just an int, so this is legal:", m001bWeekday(42))
 
 	// Byte sizes via a shifting iota.
-	fmt.Printf("KB=%.0f MB=%.0f GB=%.0f TB=%.0f\n",
-		float64(m001bKB), float64(m001bMB), float64(m001bGB), float64(m001bTB))
+	// Untyped constants take their default type (int) when passed through an
+	// interface, so %d is the matching verb - no conversion needed.
+	fmt.Printf("KB=%d MB=%d GB=%d TB=%d\n",
+		m001bKB, m001bMB, m001bGB, m001bTB)
 
 	// --- Bit flags ---
 	perms := m001bRead | m001bWrite

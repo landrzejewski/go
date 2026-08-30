@@ -77,7 +77,7 @@ func (l *Logger) Close() error {
 }
 
 // log writes a log message
-func (l *Logger) log(level LogLevel, format string, args ...interface{}) {
+func (l *Logger) log(level LogLevel, format string, args ...any) {
 	if level < l.level {
 		return
 	}
@@ -105,35 +105,35 @@ func (l *Logger) log(level LogLevel, format string, args ...interface{}) {
 		log.Println(logLine)
 	}
 
-	// UWAGA dydaktyczna: os.Exit NIE uruchamia odroczonych wywołań, więc
-	// deferred Unlock w tej metodzie nigdy się nie wykona. Tutaj jest to
-	// nieszkodliwe (proces i tak kończy pracę), ale to typowa pułapka.
-	// Samo wyjście przeniesione do funkcji Fatal - patrz komentarz tam.
+	// TEACHING NOTE: os.Exit does NOT run deferred calls, so a deferred Unlock in
+	// this method would never execute. Here that is harmless (the process is ending
+	// anyway), but it is a classic trap. The exit itself was moved into Fatal -
+	// see the comment there.
 }
 
 // Debug logs a debug message
-func Debug(format string, args ...interface{}) {
+func Debug(format string, args ...any) {
 	if GlobalLogger != nil {
 		GlobalLogger.log(LogDebug, format, args...)
 	}
 }
 
 // Info logs an info message
-func Info(format string, args ...interface{}) {
+func Info(format string, args ...any) {
 	if GlobalLogger != nil {
 		GlobalLogger.log(LogInfo, format, args...)
 	}
 }
 
 // Warn logs a warning message
-func Warn(format string, args ...interface{}) {
+func Warn(format string, args ...any) {
 	if GlobalLogger != nil {
 		GlobalLogger.log(LogWarn, format, args...)
 	}
 }
 
 // Error logs an error message
-func Error(format string, args ...interface{}) {
+func Error(format string, args ...any) {
 	if GlobalLogger != nil {
 		GlobalLogger.log(LogError, format, args...)
 	}
@@ -141,11 +141,11 @@ func Error(format string, args ...interface{}) {
 
 // Fatal logs a fatal message and exits.
 //
-// os.Exit musi być TUTAJ, a nie w Logger.log: gdy inicjalizacja loggera
-// zawiodła i GlobalLogger jest nil, poprzednia wersja nie logowała niczego
-// ANI nie kończyła programu - main wracał normalnie i proces kończył się
-// kodem 0 mimo błędu krytycznego.
-func Fatal(format string, args ...interface{}) {
+// os.Exit has to be HERE and not in Logger.log: when logger initialisation failed
+// and GlobalLogger is nil, the previous version logged nothing AND did not end the
+// program - main returned normally and the process exited with status 0 despite a
+// fatal error.
+func Fatal(format string, args ...any) {
 	if GlobalLogger != nil {
 		GlobalLogger.log(LogFatal, format, args...)
 	} else {
@@ -155,7 +155,7 @@ func Fatal(format string, args ...interface{}) {
 }
 
 // GetMetrics returns logging metrics
-func GetMetrics() map[string]interface{} {
+func GetMetrics() map[string]any {
 	if GlobalLogger == nil || GlobalLogger.metrics == nil {
 		return nil
 	}
@@ -163,7 +163,7 @@ func GetMetrics() map[string]interface{} {
 	GlobalLogger.metrics.mu.RLock()
 	defer GlobalLogger.metrics.mu.RUnlock()
 
-	metrics := make(map[string]interface{})
+	metrics := make(map[string]any)
 	for level, count := range GlobalLogger.metrics.counts {
 		metrics[logLevelNames[level]] = count
 	}

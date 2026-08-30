@@ -34,9 +34,9 @@ func TestIsEvenParametrized(t *testing.T) {
 	}
 }
 
-// Flaga nazywa się -short (a -test.short tylko przy uruchamianiu skompilowanego
-// binarza testowego). Nie ma nawiasów - to flaga wiersza poleceń, nie wywołanie
-// funkcji; testing.Short() to jej odpowiednik w kodzie.
+// The flag is -short (and -test.short only when running a compiled test binary).
+// No parentheses - it is a command-line flag, not a function call;
+// testing.Short() is its counterpart in code.
 // go test -short training.pl/go/examples
 // go test training.pl/go/examples -cover
 func TestParallel(t *testing.T) {
@@ -67,9 +67,9 @@ func cleanup() {
 }
 
 func BenchmarkIsEven(b *testing.B) {
-	// b.Loop() (Go 1.24+) zamiast `for range b.N`: pilnuje, żeby kompilator nie
-	// wyoptymalizował wywołania, którego wynik jest odrzucany - inaczej benchmark
-	// mierzyłby pustą pętlę.
+	// b.Loop() (Go 1.24+) instead of `for range b.N`: it keeps the compiler from
+	// optimising away a call whose result is discarded - otherwise the benchmark
+	// would be measuring an empty loop.
 	for b.Loop() {
 		IsEven(4)
 	}

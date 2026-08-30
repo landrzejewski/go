@@ -4,7 +4,7 @@ import (
 	"sync"
 	"time"
 
-	"tcp-chat/common"
+	"training.pl/go/examples/chat/common"
 )
 
 // Room represents a private chat room
@@ -16,8 +16,8 @@ type Room struct {
 	Members     map[string]bool
 	Invitations map[string]bool
 	CreatedAt   time.Time
-	// LastEmptyAt to moment, w którym pokój stracił ostatniego członka
-	// (zero, gdy pokój nie jest pusty). Na tym opiera się usuwanie pustych
+	// LastEmptyAt is the moment the room lost its last member (the zero time while
+	// the room is not empty). Empty-room cleanup is based on
 	// pokoi - por. CleanupManager.cleanupEmptyRooms.
 	LastEmptyAt time.Time
 	mutex       sync.RWMutex
@@ -33,8 +33,11 @@ func NewRoom(name, creator string) *Room {
 		Members:     map[string]bool{creator: true},
 		Invitations: make(map[string]bool),
 		CreatedAt:   time.Now(),
-		// Nowy pokój jest pusty do chwili dodania twórcy jako członka.
-		LastEmptyAt: time.Now(),
+		// The creator is already in Members above, so the room is NOT empty and
+		// LastEmptyAt must stay zero. (It used to be set to time.Now() here, with a
+		// comment claiming the creator was not a member yet - which contradicted the
+		// line right above it.)
+		LastEmptyAt: time.Time{},
 	}
 }
 
@@ -43,7 +46,7 @@ func (r *Room) AddMember(nickname string) {
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
 	r.Members[nickname] = true
-	r.LastEmptyAt = time.Time{} // pokój nie jest już pusty
+	r.LastEmptyAt = time.Time{} // the room is no longer empty
 	delete(r.Invitations, nickname)
 }
 

@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"net"
 	"sync"
-	"tcp-chat/common"
 	"time"
+	"training.pl/go/examples/chat/common"
 )
 
 // RateLimiter manages rate limiting for the server
@@ -56,12 +56,12 @@ func NewRateLimiter() *RateLimiter {
 	return rl
 }
 
-// TryAddConnection sprawdza limity I rejestruje połączenie w JEDNEJ operacji
-// pod tą samą blokadą.
+// TryAddConnection checks the limits AND registers the connection in ONE operation
+// under the same lock.
 //
-// Rozdzielenie tego na CanConnect (w pętli accept) i AddConnection (w osobnej
-// goroutine) dawało klasyczne TOCTOU: N równoczesnych połączeń widziało stan
-// sprzed inkrementacji i wszystkie przechodziły limit.
+// Splitting that into CanConnect (in the accept loop) and AddConnection (in a
+// separate goroutine) produced a classic TOCTOU: N concurrent connections all saw
+// the state from before the increment and all passed the limit check.
 func (rl *RateLimiter) TryAddConnection(addr net.Addr) error {
 	rl.connMutex.Lock()
 	defer rl.connMutex.Unlock()
@@ -119,11 +119,11 @@ func (rl *RateLimiter) RemoveConnection(addr net.Addr) {
 
 // CanSendMessage checks if a user can send a message.
 //
-// UWAGA: to OKNO STAŁE (fixed window), a nie kubełek tokenów. Licznik zeruje
-// się co pełną sekundę od ostatniego resetu, więc na styku dwóch okien można
-// wysłać do 2*MessagesPerSecond wiadomości w bardzo krótkim czasie (10 w chwili
-// t=0.99 s i 10 w t=1.01 s). Dla materiału szkoleniowego to akceptowalne
-// uproszczenie - wygładzenie wymagałoby prawdziwego token bucketa.
+// NOTE: this is a FIXED WINDOW, not a token bucket. The counter resets a full
+// second after the last reset, so across a window boundary up to
+// 2*MessagesPerSecond messages can be sent in a very short span (10 at t=0.99 s and
+// 10 at t=1.01 s). For training material that is an acceptable simplification -
+// smoothing it out would need a real token bucket.
 func (rl *RateLimiter) CanSendMessage(nickname string) error {
 	rl.rateMutex.Lock()
 	userLimit, exists := rl.messageRates[nickname]
@@ -237,9 +237,9 @@ func (rl *RateLimiter) RemoveUser(nickname string) {
 }
 
 // cleanup periodically cleans up old rate limit data
-// cleanup kończy się na zamknięciu stopChan. Samo cleanupTicker.Stop() NIE
-// zamyka kanału C, więc `for range rl.cleanupTicker.C` blokowałby się na zawsze
-// i goroutine wyciekałaby po każdym Stop().
+// cleanup ends when stopChan is closed. cleanupTicker.Stop() alone does NOT close
+// the C channel, so `for range rl.cleanupTicker.C` would block forever and the
+// goroutine would leak after every Stop().
 func (rl *RateLimiter) cleanup() {
 	for {
 		select {
@@ -259,8 +259,8 @@ func (rl *RateLimiter) cleanup() {
 	}
 }
 
-// Stop stops the rate limiter. Idempotentne - close na już zamkniętym kanale
-// zapanikowałoby.
+// Stop stops the rate limiter. Idempotent - closing an already closed channel
+// would panic.
 func (rl *RateLimiter) Stop() {
 	rl.stopOnce.Do(func() {
 		rl.cleanupTicker.Stop()

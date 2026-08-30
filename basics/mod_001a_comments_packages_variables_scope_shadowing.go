@@ -17,7 +17,7 @@ at the bottom calls them all in order.
 
 In Rust each module is its own namespace, so every file can have a private `fn run()`. Go is
 different: **all files of a package share one flat namespace**. `basics` is a single package spread
-over ~17 files, so a package-level `add` in module 005 would collide with a package-level `add` in
+over two dozen files, so a package-level `add` in module 005 would collide with one in
 module 010 — the compiler reports `add redeclared in this block`.
 
 The convention here is therefore: every **package-level** identifier is prefixed with its module

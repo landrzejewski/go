@@ -45,10 +45,11 @@ func changePlayer() {
 	}
 }
 
-// Nazwa musi zgadzać się ze zwracaną wartością: funkcja zwraca true, gdy pole
-// jest POZA planszą. Wcześniej nazywała się isFieldOnBoard, co twierdziło
-// dokładnie odwrotnie - kod działał tylko dlatego, że wywołanie kompensowało
-// błąd, a pierwsza "naprawa" na !isFieldOnBoard dałaby index out of range.
+// The name has to match the return value: this reports true when the field is
+// OUTSIDE the board. It used to be called isFieldOnBoard, which claimed exactly
+// the opposite - the code only worked because the call site compensated for the
+// mistake, and the obvious "fix" to !isFieldOnBoard would have given an index
+// out of range.
 func isFieldOutsideBoard(row, col int) bool {
 	return row < 0 || row > maxIndex || col < 0 || col > maxIndex
 }
@@ -57,11 +58,11 @@ func isFieldTaken(row, col int) bool {
 	return board[row][col] != empty
 }
 
-// Zwracamy symbol, który FAKTYCZNIE utworzył zwycięską linię, a nie
-// currentPlayer. Poprzednia wersja była poprawna tylko przy niewidocznym
-// założeniu "checkWinner wołane dokładnie raz, zaraz po ruchu, przed
-// changePlayer" - i psuła się przy każdym innym użyciu (np. sprawdzeniu
-// wczytanej planszy).
+// Return the symbol that ACTUALLY formed the winning line, not currentPlayer.
+// The previous version was correct only under the invisible assumption
+// "checkWinner is called exactly once, right after a move, before changePlayer"
+// - and broke under any other use (for instance checking a board loaded from
+// somewhere else).
 func checkWinner() string {
 	for i := 0; i <= maxIndex; i++ {
 		if board[i][0] != empty && board[i][0] == board[i][1] && board[i][1] == board[i][2] {
@@ -87,16 +88,16 @@ func isBoardFull() bool {
 }
 
 func TicTacToe() {
-	// Czytamy CAŁY wiersz i dopiero z niego parsujemy liczby. fmt.Scanln przy
-	// błędzie parsowania nie konsumuje wadliwego tokenu, więc wpisanie "abc"
-	// powodowało, że kolejne wywołanie potykało się o te same bajty i program
-	// w nieskończoność wypisywał "Invalid move. Try again".
+	// Read the WHOLE line and only then parse numbers out of it. fmt.Scanln
+	// on a parse error does not consume the offending token, so typing "abc" made
+	// the next call trip over the same bytes and the program printed
+	// "Invalid move. Try again" forever.
 	input := bufio.NewScanner(os.Stdin)
 	printBoard()
 	for {
 		fmt.Printf("Player %s, enter move (column, row): ", currentPlayer)
 		if !input.Scan() {
-			fmt.Println("\nKoniec wejścia, kończę grę.")
+			fmt.Println("\nEnd of input, quitting.")
 			return
 		}
 

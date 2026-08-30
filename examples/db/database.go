@@ -9,15 +9,16 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"sync"
 	"syscall"
-	"training.pl/go/common"
+	"training.pl/go/examples/common"
 )
 
 const stateFileSuffix = ".state"
 
-// Typowane stałe zamiast gołych stringów: literówka w nazwie akcji jest teraz
-// błędem kompilacji, a nie cichym zgubieniem komendy (wywołujący czekałby
-// wtedy wiecznie na <-reply).
+// Typed constants instead of bare strings: a typo in an action name is now a
+// compile error rather than a silently dropped command (the caller would then
+// wait on <-reply forever).
 type action string
 
 const (
@@ -50,10 +51,14 @@ type Database struct {
 	file        *os.File
 	commands    chan command
 	state       *DatabaseState
-	idGenerator IdGenerator
-	// done jest zamykane przez run() po opróżnieniu kanału komend - dzięki
-	// temu Close() wie, kiedy nikt już nie pisze do pliku ani do state.
+	idGenerator IDGenerator
+	// done is closed by run() once the command channel has been drained - that is
+	// how Close() knows nobody is still writing to the file or to state.
 	done chan struct{}
+	// closeOnce keeps Close idempotent: DatabaseExercise calls it both from the
+	// signal goroutine and from a defer, and close() on an already closed channel
+	// panics.
+	closeOnce sync.Once
 }
 
 type DatabaseState struct {
@@ -61,7 +66,13 @@ type DatabaseState struct {
 	LastId  int64
 }
 
-func Db(filepath string, idGenerator IdGenerator) *Database {
+// NOTE ON A KNOWN LIMITATION: space is never reclaimed. delete removes only the
+// index entry, and update always appends at endOffset(), so the file grows without
+// bound. Exercise 8 in notes.md asks for reuse of freed space - implementing it
+// means keeping a free list of (offset, length) holes and picking one that fits,
+// plus compaction when fragmentation gets bad.
+
+func Db(filepath string, idGenerator IDGenerator) *Database {
 	file, err := os.OpenFile(filepath, os.O_CREATE|os.O_RDWR, 0644)
 	catchFatal(err, "Failed to open database")
 	var state DatabaseState
@@ -71,14 +82,11 @@ func Db(filepath string, idGenerator IdGenerator) *Database {
 	} else {
 		catchFatal(common.FromBytes(bytes, &state), "Failed reading database state")
 	}
-	// Zasianie generatora zapisanym stanem. Bez tego LastId było polem
-	// martwym - zapisywanym na dysk, ale nigdy nieczytanym - a Sequence
-	// startowało od zera przy każdym uruchomieniu. Po restarcie id zaczynały
-	// się od 1 i albo trafiały na "record with id 1 already exists", albo po
-	// cichu nadpisywały istniejący rekord.
-	if seedable, ok := idGenerator.(interface{ seed(int64) }); ok {
-		seedable.seed(state.LastId)
-	}
+	// Seed the generator from the stored state. Without this LastId was a dead
+	// field - written to disk but never read back - and Sequence restarted from
+	// zero on every run. After a restart ids began at 1 again and either hit
+	// "record with id 1 already exists" or silently overwrote an existing record.
+	idGenerator.seed(state.LastId)
 
 	return &Database{
 		file:        file,
@@ -89,29 +97,31 @@ func Db(filepath string, idGenerator IdGenerator) *Database {
 	}
 }
 
-//func catchFatal(err error, description func() string) {
-//	if err != nil {
-//		log.Fatal(description())
-//	}
-//}
-
+// catchFatal calls log.Fatal, which is acceptable only because this package is
+// demo code with its own entry points. A real library returns errors instead of
+// terminating its caller's process.
 func catchFatal(err error, description string) {
 	if err != nil {
 		log.Fatal(description + ": " + err.Error())
 	}
 }
 
+// Close is safe to call more than once.
 func (d *Database) Close() {
-	// close(d.commands) samo w sobie NIE czeka na run() - bez <-d.done goroutine
-	// run mogłaby jeszcze pisać do pliku i mutować state, podczas gdy Close
-	// zamyka plik i serializuje ten sam state (wyścig danych + zapis do
-	// zamkniętego deskryptora). Komendy z bufora też zostałyby porzucone.
-	close(d.commands)
-	<-d.done
+	d.closeOnce.Do(func() {
+		// close(d.commands) on its own does NOT wait for run() - without <-d.done
+		// the run goroutine could still be writing to the file and mutating state
+		// while Close closes the file and serialises that same state (a data race
+		// plus a write to a closed descriptor). Buffered commands would be dropped
+		// too.
+		close(d.commands)
+		<-d.done
 
-	// Kolejność: najpierw zapis stanu (używa d.file.Name()), potem zamknięcie pliku.
-	catchFatal(d.saveState(), "Save database state failed")
-	catchFatal(d.file.Close(), "Close database file failed")
+		// Order matters: save the state first (it uses d.file.Name()), then close
+		// the file.
+		catchFatal(d.saveState(), "Save database state failed")
+		catchFatal(d.file.Close(), "Close database file failed")
+	})
 }
 
 func (d *Database) saveState() error {
@@ -135,8 +145,8 @@ func (d *Database) run() {
 		case actionDelete:
 			cmd.reply <- d.delete(cmd.id)
 		default:
-			// Bez tej gałęzi nieznana akcja nie dawała odpowiedzi, a wywołujący
-			// blokował się na <-reply na zawsze.
+			// Without this branch an unknown action produced no reply and the
+			// caller blocked on <-reply forever.
 			cmd.reply <- &Result{nil, fmt.Errorf("unknown action %q", cmd.action)}
 		}
 	}
@@ -152,8 +162,8 @@ func (d *Database) create(object any) *Result {
 		return &Result{Record: nil, Error: err}
 	}
 	id := d.idGenerator.next()
-	_, exit := d.state.Records[id]
-	if exit {
+	_, exists := d.state.Records[id]
+	if exists {
 		return &Result{nil, fmt.Errorf("record with id %d already exists", id)}
 	}
 	length, err := d.file.WriteAt(bytes, offset)
@@ -162,7 +172,7 @@ func (d *Database) create(object any) *Result {
 	}
 	record := &Record{id, offset, int64(length)}
 	d.state.Records[id] = record
-	d.state.LastId = id // utrwalane niżej przez saveState - patrz Db()
+	d.state.LastId = id // persisted by saveState below - see Db()
 	if err := d.saveState(); err != nil {
 		return &Result{Record: nil, Error: err}
 	}
@@ -183,7 +193,7 @@ func (d *Database) read(id int64, object any) *Result {
 	if err != nil {
 		return &Result{Record: nil, Error: err}
 	}
-	return &Result{record, err}
+	return &Result{record, nil}
 }
 
 func (d *Database) delete(id int64) *Result {
@@ -217,9 +227,9 @@ func (d *Database) update(id int64, object any) *Result {
 	}
 	record.Offset = offset
 	record.Length = int64(length)
-	// Bez zapisu stanu (co robią już create i delete) indeks na dysku wskazywał
-	// stary offset/length, podczas gdy nowe bajty leżały na końcu pliku -
-	// każda awaria gubiła aktualizację i zostawiała indeks wskazujący śmieci.
+	// Without saving the state (which create and delete already do) the on-disk
+	// index pointed at the old offset/length while the new bytes sat at the end of
+	// the file - any crash lost the update and left the index pointing at garbage.
 	if err := d.saveState(); err != nil {
 		return &Result{nil, err}
 	}
@@ -256,14 +266,14 @@ func (d *Database) Update(id int64, input any) *Result {
 
 func DatabaseTest() {
 	db := Db("users.db", &Sequence{})
-	// go db.run() PRZED defer db.Close(): defery wykonują się w odwrotnej
-	// kolejności rejestracji, a Close czeka teraz na run.
+	// go db.run() BEFORE defer db.Close(): defers run in reverse registration
+	// order, and Close now waits for run.
 	go db.run()
 	defer db.Close()
 
 	user := User{"Jan", "Kowalski", 25, true}
 	result := db.Create(&user)
-	// Bez sprawdzenia błędu kolejna linia dereferencjonowałaby nil Record.
+	// Without checking the error the next line would dereference a nil Record.
 	if result.Error != nil {
 		log.Println("Create failed:", result.Error)
 		return
@@ -294,10 +304,10 @@ func DatabaseExercise() {
 	db := Db("users.db", &Sequence{})
 	go db.run()
 
-	// UWAGA: router.Run blokuje aż do zakończenia procesu, więc `defer db.Close()`
-	// nigdy by się nie wykonał - a wraz z nim zapis stanu bazy. Dlatego
-	// zamykamy bazę jawnie po wyjściu z Run i przechwytujemy sygnał
-	// przerwania, żeby Ctrl-C też utrwalił stan.
+	// NOTE: router.Run blocks until the process ends, so `defer db.Close()` would
+	// never run - and the database state would never be written. Hence the explicit
+	// close after Run returns, plus a signal handler so that Ctrl-C persists the
+	// state too. Close is idempotent (sync.Once), so both paths firing is fine.
 	defer db.Close()
 
 	stop := make(chan os.Signal, 1)
@@ -319,7 +329,7 @@ func DatabaseExercise() {
 	router.DELETE("/users/:id", deleteUser)
 
 	if err := router.Run(":8080"); err != nil {
-		log.Println("Serwer zakończył działanie:", err)
+		log.Println("server stopped:", err)
 	}
 }
 

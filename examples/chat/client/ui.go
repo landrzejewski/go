@@ -7,7 +7,7 @@ import (
 	"strings"
 	"sync"
 
-	"tcp-chat/common"
+	"training.pl/go/examples/chat/common"
 )
 
 // UI handles terminal user interface
@@ -294,23 +294,25 @@ func (ui *UI) handleMessage(msg *common.Message) {
 				roomName = msg.Room
 			}
 			fmt.Printf("[%s] [Room: %s] %s: %s\n", timestamp, roomName, msg.Sender, msg.Content)
+		} else if msg.Recipient == "*" || msg.Recipient == "" {
+			// Broadcast. This test must come BEFORE the "our own message" one
+			// below: our own broadcast comes back with Sender == our nickname, so
+			// with the other order it was reported as "[Private -> *]".
+			fmt.Printf("[%s] %s: %s\n", timestamp, msg.Sender, msg.Content)
 		} else if msg.Recipient == ui.conn.nickname {
-			// Private message
+			// Private message addressed to us.
 			fmt.Printf("[%s] [Private] %s: %s\n", timestamp, msg.Sender, msg.Content)
 		} else if msg.Sender == ui.conn.nickname {
-			// Kopia własnej wiadomości prywatnej, którą serwer celowo odsyła
-			// nadawcy. Bez tej gałęzi Recipient wskazywał drugą osobę, więc
-			// żaden warunek nie pasował i "/msg bob hi" nie drukowało u nas nic.
+			// A copy of our own private message, which the server deliberately
+			// echoes back to the sender. Without this branch Recipient pointed at
+			// the other person, so no condition matched and "/msg bob hi" printed
+			// nothing on our side.
 			fmt.Printf("[%s] [Private -> %s] %s\n", timestamp, msg.Recipient, msg.Content)
-		} else if msg.Recipient == "*" || msg.Recipient == "" {
-			// Broadcast message
-			fmt.Printf("[%s] %s: %s\n", timestamp, msg.Sender, msg.Content)
 		}
 
 	case common.TypeUserList:
-		// ui.users jest czytane przez showUsers() z goroutine wejścia,
-		// a zapisywane tutaj z goroutine odbierającej - wymaga blokady,
-		// tak samo jak ui.rooms.
+		// ui.users is read by showUsers() from the input goroutine and written here
+		// from the receiving goroutine - it needs a lock, just like ui.rooms.
 		ui.mutex.Lock()
 		ui.users = msg.Users
 		ui.mutex.Unlock()
@@ -320,10 +322,10 @@ func (ui *UI) handleMessage(msg *common.Message) {
 
 	case common.TypeRoom:
 		if msg.Action == common.RoomCreate {
-			// msg.RoomName niesie SAMĄ nazwę pokoju. Wcześniej zapisywaliśmy
-			// tu msg.Content, czyli całe zdanie serwera ("Room 'x' created
-			// successfully"), przez co "/room list" drukowało bzdury, a mapa
-			// wbrew swojemu komentarzowi nie trzymała roomID -> roomName.
+			// msg.RoomName carries JUST the room name. We used to store msg.Content
+			// here - the server's whole sentence ("Room 'x' created successfully") -
+			// so "/room list" printed nonsense and, contrary to its own comment, the
+			// map did not hold roomID -> roomName.
 			ui.mutex.Lock()
 			ui.rooms[msg.Room] = msg.RoomName
 			ui.mutex.Unlock()
@@ -342,8 +344,8 @@ func (ui *UI) handleMessage(msg *common.Message) {
 			ui.mutex.Lock()
 			delete(ui.rooms, msg.Room)
 			ui.mutex.Unlock()
-			// Content niesie pełny komunikat (wyjście / kick / usunięcie pokoju),
-			// RoomName samą nazwę - drukujemy komunikat, bo tylko on rozróżnia
+			// Content carries the full message (leave / kick / room deleted),
+			// RoomName just the name - print the message, because only it tells
 			// te trzy sytuacje.
 			fmt.Printf("[%s] %s\n", timestamp, msg.Content)
 		}
@@ -361,9 +363,9 @@ func (ui *UI) handleMessage(msg *common.Message) {
 		fmt.Printf("\rFile transfer: %s - %s", msg.Filename, msg.Content)
 
 	case common.TypeFileComplete:
-		// Serwer wysyła FileComplete OBU stronom. U nadawcy rekord transferu
-		// został już usunięty przez notifyComplete, więc próba "odebrania"
-		// kończyła się mylącym "File received" plus "file transfer not found".
+		// The server sends FileComplete to BOTH sides. On the sender the transfer
+		// record was already removed by notifyComplete, so trying to "receive"
+		// ended with a misleading "File received" plus "file transfer not found".
 		if !ui.fileTransfer.IsIncoming(msg.FileID) {
 			fmt.Printf("\n[%s] File sent: %s\n", timestamp, msg.Filename)
 			return

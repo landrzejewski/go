@@ -22,15 +22,15 @@ var database *sql.DB
 func RestApi() {
 	db, err := sql.Open("postgres", "postgres://admin:admin@localhost/users?sslmode=disable")
 	if err != nil {
-		// Bez przerwania działania kolejna linia dereferencjonowałaby nil *sql.DB.
-		log.Fatalf("Nie można otworzyć połączenia z bazą: %v", err)
+		// Without stopping here the next line would dereference a nil *sql.DB.
+		log.Fatalf("cannot open the database connection: %v", err)
 	}
 
-	// DDL/DML wykonujemy przez Exec, nie Query. Query zwraca *sql.Rows, które
-	// trzeba zamknąć - porzucone trzymało połączenie wypożyczone z puli aż do
+	// Run DDL/DML with Exec, not Query. Query returns a *sql.Rows that must be
+	// closed - abandoning it kept a connection checked out of the pool until
 	// finalizera GC.
 	if _, err := db.Exec("create table if not exists users (id serial primary key, name varchar(100), email varchar(50))"); err != nil {
-		log.Fatalf("Nie można utworzyć tabeli: %v", err)
+		log.Fatalf("cannot create the table: %v", err)
 	}
 	database = db
 
@@ -41,19 +41,20 @@ func RestApi() {
 	router.PUT("/users/:id", updateUser)
 	router.DELETE("/users/:id", deleteUser)
 	if err := router.Run(":8080"); err != nil {
-		log.Fatalf("Serwer zakończył działanie: %v", err)
+		log.Fatalf("server stopped: %v", err)
 	}
 }
 
 func getUsers(c *gin.Context) {
-	// Kolumny wypisane jawnie: "select *" wiąże Scan z fizyczną kolejnością
-	// kolumn, więc dodanie kolumny po cichu psuje odczyt.
+	// Columns listed explicitly: "select *" ties Scan to the physical column order,
+	// so adding a column silently breaks the read.
 	rows, err := database.Query("select id, name, email from users")
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	// Bez Close połączenie wraca do puli dopiero po wyczerpaniu wyniku.
+	// Without Close the connection returns to the pool only once the result set is
+	// fully drained.
 	defer rows.Close()
 
 	var users = make([]User, 0)
@@ -65,7 +66,8 @@ func getUsers(c *gin.Context) {
 		}
 		users = append(users, user)
 	}
-	// rows.Err() odróżnia normalny koniec wyniku od błędu transportu w trakcie.
+	// rows.Err() tells a normal end of the result set apart from a transport error
+	// that happened midway.
 	if err := rows.Err(); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -80,10 +82,10 @@ func getUserById(c *gin.Context) {
 		return
 	}
 
-	// QueryRow zamiast Query: poprzednia wersja wołała rows.Next() raz i wracała
-	// bez Close, więc każde GET /users/:id wyciekało połączenie. Brak wiersza
-	// rozpoznajemy po sql.ErrNoRows, a nie po heurystyce "user.ID == 0"
-	// (która błędnie zgłaszałaby 404 dla legalnego rekordu o id 0).
+	// QueryRow instead of Query: the previous version called rows.Next() once and
+	// returned without Close, so every GET /users/:id leaked a connection. A missing
+	// row is detected via sql.ErrNoRows, not via the "user.ID == 0" heuristic
+	// (which would wrongly report 404 for a legitimate record with id 0).
 	var user User
 	err = database.QueryRow("select id, name, email from users where id = $1", id).
 		Scan(&user.ID, &user.Name, &user.Email)
@@ -129,14 +131,21 @@ func updateUser(c *gin.Context) {
 
 	result, err := database.Exec("update users set name = $1, email = $2 where id = $3", updatedUser.Name, updatedUser.Email, id)
 	if err != nil {
-		// gin.H{"error": err} serializowało interfejs error, który nie ma pól
-		// eksportowanych - klient dostawał {"error":{}}. Potrzebny err.Error().
+		// gin.H{"error": err} serialised the error interface, which has no exported
+		// fields - the client received {"error":{}}. err.Error() is what is needed.
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	// Bez sprawdzenia RowsAffected aktualizacja nieistniejącego id kończyła się
-	// statusem 200, więc 404 nigdy nie powstawało.
-	if affected, err := result.RowsAffected(); err == nil && affected == 0 {
+	// Without checking RowsAffected, updating a non-existent id returned 200, so a
+	// 404 was never produced. The error from RowsAffected is reported rather than
+	// discarded: `err == nil && affected == 0` would silently treat a driver
+	// failure as a successful update.
+	affected, err := result.RowsAffected()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if affected == 0 {
 		c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
 		return
 	}
@@ -156,11 +165,16 @@ func deleteUser(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	if affected, err := result.RowsAffected(); err == nil && affected == 0 {
+	affected, err := result.RowsAffected()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if affected == 0 {
 		c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
 		return
 	}
-	// Bez tego handler kończył się bez zapisania odpowiedzi, więc gin zwracał
-	// 200 OK z pustym ciałem zamiast 204 No Content.
+	// Without this the handler returned without writing a response, so gin sent
+	// 200 OK with an empty body instead of 204 No Content.
 	c.Status(http.StatusNoContent)
 }
