@@ -50,10 +50,15 @@ func main() {
 				Sender:  *nickname,
 				Content: "Client shutting down",
 			}
-			conn.sendChan <- disconnectMsg
-
-			// Give message time to send
-			time.Sleep(100 * time.Millisecond)
+			// Wysyłka nieblokująca: jeśli writePump już się zakończył, a bufor
+			// jest pełny, gołe `conn.sendChan <- msg` zawiesiłoby Ctrl-C.
+			select {
+			case conn.sendChan <- disconnectMsg:
+				// Give message time to send
+				time.Sleep(100 * time.Millisecond)
+			case <-time.After(time.Second):
+				fmt.Println("Nie udało się wysłać komunikatu rozłączenia")
+			}
 		}
 
 		conn.Disconnect()

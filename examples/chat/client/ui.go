@@ -67,7 +67,7 @@ func (ui *UI) showWelcome() {
 	fmt.Println("  /transfers               - Show file transfers")
 	fmt.Println("  /quit                    - Exit")
 	fmt.Println("\nType messages without '/' to broadcast to all users")
-	fmt.Println("=================================\n")
+	fmt.Printf("=================================\n\n")
 }
 
 // handleInput handles user input
@@ -297,29 +297,43 @@ func (ui *UI) handleMessage(msg *common.Message) {
 		} else if msg.Recipient == ui.conn.nickname {
 			// Private message
 			fmt.Printf("[%s] [Private] %s: %s\n", timestamp, msg.Sender, msg.Content)
+		} else if msg.Sender == ui.conn.nickname {
+			// Kopia własnej wiadomości prywatnej, którą serwer celowo odsyła
+			// nadawcy. Bez tej gałęzi Recipient wskazywał drugą osobę, więc
+			// żaden warunek nie pasował i "/msg bob hi" nie drukowało u nas nic.
+			fmt.Printf("[%s] [Private -> %s] %s\n", timestamp, msg.Recipient, msg.Content)
 		} else if msg.Recipient == "*" || msg.Recipient == "" {
 			// Broadcast message
 			fmt.Printf("[%s] %s: %s\n", timestamp, msg.Sender, msg.Content)
 		}
 
 	case common.TypeUserList:
+		// ui.users jest czytane przez showUsers() z goroutine wejścia,
+		// a zapisywane tutaj z goroutine odbierającej - wymaga blokady,
+		// tak samo jak ui.rooms.
+		ui.mutex.Lock()
 		ui.users = msg.Users
+		ui.mutex.Unlock()
 
 	case common.TypeStatus:
 		fmt.Printf("[%s] %s changed status to %s\n", timestamp, msg.Sender, msg.Status)
 
 	case common.TypeRoom:
 		if msg.Action == common.RoomCreate {
+			// msg.RoomName niesie SAMĄ nazwę pokoju. Wcześniej zapisywaliśmy
+			// tu msg.Content, czyli całe zdanie serwera ("Room 'x' created
+			// successfully"), przez co "/room list" drukowało bzdury, a mapa
+			// wbrew swojemu komentarzowi nie trzymała roomID -> roomName.
 			ui.mutex.Lock()
-			ui.rooms[msg.Room] = msg.Content
+			ui.rooms[msg.Room] = msg.RoomName
 			ui.mutex.Unlock()
 			fmt.Printf("[%s] %s (ID: %s)\n", timestamp, msg.Content, msg.Room)
 		} else if msg.Action == common.RoomJoin {
 			// Add room to our list when we join
 			ui.mutex.Lock()
-			ui.rooms[msg.Room] = msg.Content
+			ui.rooms[msg.Room] = msg.RoomName
 			ui.mutex.Unlock()
-			fmt.Printf("[%s] Joined room '%s' (ID: %s)\n", timestamp, msg.Content, msg.Room)
+			fmt.Printf("[%s] Joined room '%s' (ID: %s)\n", timestamp, msg.RoomName, msg.Room)
 		} else if msg.Action == common.RoomMembers {
 			// Display room members
 			fmt.Printf("[%s] %s\n", timestamp, msg.Content)
@@ -328,7 +342,10 @@ func (ui *UI) handleMessage(msg *common.Message) {
 			ui.mutex.Lock()
 			delete(ui.rooms, msg.Room)
 			ui.mutex.Unlock()
-			fmt.Printf("[%s] Left room '%s'\n", timestamp, msg.Content)
+			// Content niesie pełny komunikat (wyjście / kick / usunięcie pokoju),
+			// RoomName samą nazwę - drukujemy komunikat, bo tylko on rozróżnia
+			// te trzy sytuacje.
+			fmt.Printf("[%s] %s\n", timestamp, msg.Content)
 		}
 
 	case common.TypeInvite:
@@ -344,6 +361,13 @@ func (ui *UI) handleMessage(msg *common.Message) {
 		fmt.Printf("\rFile transfer: %s - %s", msg.Filename, msg.Content)
 
 	case common.TypeFileComplete:
+		// Serwer wysyła FileComplete OBU stronom. U nadawcy rekord transferu
+		// został już usunięty przez notifyComplete, więc próba "odebrania"
+		// kończyła się mylącym "File received" plus "file transfer not found".
+		if !ui.fileTransfer.IsIncoming(msg.FileID) {
+			fmt.Printf("\n[%s] File sent: %s\n", timestamp, msg.Filename)
+			return
+		}
 		fmt.Printf("\n[%s] File received: %s\n", timestamp, msg.Filename)
 		if err := ui.fileTransfer.ReceiveFile(msg.FileID); err != nil {
 			fmt.Printf("Error saving file: %v\n", err)
@@ -373,7 +397,7 @@ func (ui *UI) showUsers() {
 			fmt.Printf("  %s\n", user)
 		}
 	}
-	fmt.Println("==================\n")
+	fmt.Printf("==================\n\n")
 }
 
 // showRooms displays user's rooms
@@ -388,7 +412,7 @@ func (ui *UI) showRooms() {
 			fmt.Printf("  %s: %s\n", id, info)
 		}
 	}
-	fmt.Println("==================\n")
+	fmt.Printf("==================\n\n")
 }
 
 // showTransfers displays active file transfers
@@ -403,5 +427,5 @@ func (ui *UI) showTransfers() {
 			fmt.Printf("  %s\n", transfer)
 		}
 	}
-	fmt.Println("===================\n")
+	fmt.Printf("===================\n\n")
 }

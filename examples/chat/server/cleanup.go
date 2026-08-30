@@ -2,6 +2,8 @@ package main
 
 import (
 	"log"
+	"time"
+
 	"tcp-chat/common"
 )
 
@@ -86,21 +88,28 @@ func (cm *CleanupManager) cleanupFileTransfers() {
 	}
 }
 
-// cleanupEmptyRooms removes rooms that have been empty for too long
+// cleanupEmptyRooms usuwa pokoje, które stoją puste dłużej niż EmptyRoomTimeout.
+//
+// Liczy się czas OD OPUSTOSZENIA (Room.LastEmptyAt), a nie od utworzenia.
+// Poprzednia wersja porównywała CreatedAt, więc pokój sprzed 31 minut znikał
+// w chwili wyjścia ostatniego członka, a pokój sprzed minuty przeżywał pusty -
+// mimo że komentarz obiecywał coś zupełnie innego.
 func (cm *CleanupManager) cleanupEmptyRooms() {
 	now := time.Now()
 	var toDelete []string
+	creators := make(map[string]string)
 
 	cm.server.roomManager.mutex.RLock()
 	for roomID, room := range cm.server.roomManager.rooms {
 		room.mutex.RLock()
 		memberCount := len(room.Members)
-		createdAt := room.CreatedAt
+		lastEmptyAt := room.LastEmptyAt
+		creator := room.Creator
 		room.mutex.RUnlock()
 
-		// Remove rooms that are empty and older than timeout
-		if memberCount == 0 && now.Sub(createdAt) > common.EmptyRoomTimeout {
+		if memberCount == 0 && !lastEmptyAt.IsZero() && now.Sub(lastEmptyAt) > common.EmptyRoomTimeout {
 			toDelete = append(toDelete, roomID)
+			creators[roomID] = creator
 			log.Printf("Cleaning up empty room: %s (%s)", room.Name, roomID)
 		}
 	}
@@ -108,6 +117,8 @@ func (cm *CleanupManager) cleanupEmptyRooms() {
 
 	// Delete empty rooms
 	for _, roomID := range toDelete {
+		// Zwolnienie limitu pokoi twórcy - patrz komentarz przy RoomDelete.
+		cm.server.rateLimiter.RemoveRoom(creators[roomID])
 		cm.server.roomManager.RemoveRoom(roomID)
 	}
 }

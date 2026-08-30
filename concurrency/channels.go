@@ -60,7 +60,8 @@ func Run() {
 	/*
 		The select statement in Go allows you to wait on multiple channel operations.
 		It chooses a case that is ready to proceed, allowing you to handle multiple channels
-		concurrently. If multiple channels are ready, one of them is selected at random.
+		concurrently. If several cases are ready, one is picked uniformly at random -
+		the order of the cases in the source code does not give any of them priority.
 	*/
 
 	for range 2 {
@@ -85,8 +86,12 @@ func Run() {
 		channel <- fmt.Sprintf("Message %d", i)
 	}
 
-	time.Sleep(5 * time.Second)
+	// Zamknięcie kanału źródłowego kończy broadcaster, który w swoim defer
+	// zamyka kanały słuchaczy - dzięki temu wszystkie goroutines kończą się
+	// same i nie zostaje żaden wyciek.
 	close(channel)
+	// Czekamy, aż słuchacze wypiszą to, co jeszcze mają w kolejce.
+	time.Sleep(1 * time.Second)
 }
 
 func listener(id int, channel <-chan string) {
@@ -96,6 +101,14 @@ func listener(id int, channel <-chan string) {
 }
 
 func broadcaster(channel <-chan string, listeners []chan string) {
+	// Broadcaster jest jedynym nadawcą dla kanałów słuchaczy, więc to on musi
+	// je zamknąć. Bez tego `for range` w każdym listenerze nigdy się nie kończy
+	// i po zamknięciu `channel` zostają trzy zawieszone goroutines.
+	defer func() {
+		for _, listener := range listeners {
+			close(listener)
+		}
+	}()
 	for msg := range channel {
 		for _, listener := range listeners {
 			listener <- msg

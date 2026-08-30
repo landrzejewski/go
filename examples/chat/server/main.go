@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -67,8 +68,8 @@ func (s *Server) Start(port string) error {
 			}
 		}
 
-		// Check rate limits before accepting
-		if err := s.rateLimiter.CanConnect(conn.RemoteAddr()); err != nil {
+		// Sprawdzenie limitu i rejestracja połączenia w jednej, atomowej operacji.
+		if err := s.rateLimiter.TryAddConnection(conn.RemoteAddr()); err != nil {
 			common.Warn("Connection rejected from %s: %v", conn.RemoteAddr(), err)
 			conn.Close()
 			continue
@@ -80,8 +81,15 @@ func (s *Server) Start(port string) error {
 
 // handleNewConnection handles a new client connection
 func (s *Server) handleNewConnection(conn net.Conn) {
-	// Add connection to rate limiter
-	s.rateLimiter.AddConnection(conn.RemoteAddr())
+	// Slot połączenia zajęto już w pętli accept (TryAddConnection), więc tutaj
+	// wystarczy zagwarantować jego zwolnienie - BEZWARUNKOWO, także gdy klient
+	// rozłączy się przed rejestracją nicku.
+	//
+	// Wcześniej zwolnienie działo się dopiero w UnregisterClient, PO wczesnym
+	// return dla pustego nicku - więc każdy skan portów i każdy odrzucony
+	// klient zabierał slot na stałe. Po MaxConnections takich połączeń serwer
+	// odmawiał już wszystkim.
+	defer s.rateLimiter.RemoveConnection(conn.RemoteAddr())
 
 	// Set initial read/write deadlines
 	conn.SetReadDeadline(time.Now().Add(common.ReadTimeout))
@@ -91,7 +99,8 @@ func (s *Server) handleNewConnection(conn net.Conn) {
 	client.RemoteAddr = conn.RemoteAddr().String()
 	common.Info("New connection from %s", conn.RemoteAddr())
 
-	// Start client goroutines
+	// Start blokuje aż do zakończenia obu pomp, żeby defer powyżej wykonał się
+	// dokładnie wtedy, gdy połączenie faktycznie się kończy.
 	client.Start()
 }
 
@@ -111,7 +120,8 @@ func (s *Server) RegisterClient(client *Client, nickname string) (bool, error) {
 		return false, fmt.Errorf("nickname '%s' is already taken", nickname)
 	}
 
-	client.Nickname = nickname
+	// Nickname jest czytane przez goroutines innych klientów - tylko przez setter.
+	client.SetNickname(nickname)
 	s.clients.Store(nickname, client)
 
 	// Notify all users about new connection
@@ -131,41 +141,36 @@ func (s *Server) RegisterClient(client *Client, nickname string) (bool, error) {
 
 // UnregisterClient removes a client from the server
 func (s *Server) UnregisterClient(client *Client) {
-	if client.Nickname == "" {
+	// Slot połączenia zwalnia teraz defer w handleNewConnection - bezwarunkowo
+	// i dla każdego gniazda, także takiego, które nigdy się nie zarejestrowało.
+	// Tutaj sprzątamy wyłącznie stan związany z NICKIEM.
+	nickname := client.GetNickname()
+	if nickname == "" {
 		return
 	}
 
-	s.clients.Delete(client.Nickname)
+	s.clients.Delete(nickname)
 
 	// Remove from all rooms and notify room members
-	rooms := s.roomManager.GetUserRooms(client.Nickname)
+	rooms := s.roomManager.GetUserRooms(nickname)
 	for _, room := range rooms {
-		room.RemoveMember(client.Nickname)
+		room.RemoveMember(nickname)
 
-		// Notify room members about the disconnection
-		leaveMsg := common.NewTextMessage("Server", "", fmt.Sprintf("%s has disconnected from the room", client.Nickname))
+		leaveMsg := common.NewTextMessage("Server", "", fmt.Sprintf("%s has disconnected from the room", nickname))
 		leaveMsg.Room = room.ID
 		s.roomManager.BroadcastToRoom(s, room.ID, leaveMsg)
 	}
 
 	// Notify all users
-	disconnectMsg := common.NewBroadcastMessage("Server", fmt.Sprintf("%s has left the chat", client.Nickname))
+	disconnectMsg := common.NewBroadcastMessage("Server", fmt.Sprintf("%s has left the chat", nickname))
 	s.BroadcastMessage(disconnectMsg, "")
 
 	s.BroadcastUserList()
 
 	// Clean up rate limiter
-	s.rateLimiter.RemoveUser(client.Nickname)
+	s.rateLimiter.RemoveUser(nickname)
 
-	// Remove connection from rate limiter
-	if client.RemoteAddr != "" {
-		addr, _ := net.ResolveTCPAddr("tcp", client.RemoteAddr)
-		if addr != nil {
-			s.rateLimiter.RemoveConnection(addr)
-		}
-	}
-
-	common.Info("Client unregistered: %s", client.Nickname)
+	common.Info("Client unregistered: %s", nickname)
 }
 
 // GetClient retrieves a client by nickname
@@ -182,13 +187,15 @@ func (s *Server) BroadcastMessage(msg *common.Message, exclude string) {
 	s.clients.Range(func(key, value interface{}) bool {
 		client := value.(*Client)
 
+		nickname := client.GetNickname()
+
 		// Skip excluded client
-		if client.Nickname == exclude {
+		if nickname == exclude {
 			return true
 		}
 
 		// Skip invisible clients
-		if client.GetStatus() == common.StatusInvisible && msg.Sender != client.Nickname {
+		if client.GetStatus() == common.StatusInvisible && msg.Sender != nickname {
 			return true
 		}
 
@@ -205,7 +212,7 @@ func (s *Server) BroadcastUserList() {
 		client := value.(*Client)
 		// Don't include invisible users in the list
 		if client.GetStatus() != common.StatusInvisible {
-			users = append(users, fmt.Sprintf("%s:%s", client.Nickname, client.GetStatus()))
+			users = append(users, fmt.Sprintf("%s:%s", client.GetNickname(), client.GetStatus()))
 		}
 		return true
 	})
@@ -220,26 +227,47 @@ func (s *Server) BroadcastUserList() {
 
 // HandleMessage processes incoming messages from clients
 func (s *Server) HandleMessage(client *Client, msg *common.Message) error {
-	common.Debug("Handling %s message from %s", msg.Type, client.Nickname)
+	nickname := client.GetNickname()
+	common.Debug("Handling %s message from %s", msg.Type, nickname)
+
+	// Wszystko poza CONNECT wymaga rejestracji. Bez tego anonimowy klient mógł
+	// rozgłaszać wiadomości, tworzyć pokoje i uruchamiać transfery plików,
+	// a wszystkie mapy limitów kluczowały się pustym nickiem, więc niezalogowani
+	// dzielili jeden wspólny kubełek.
+	if msg.Type != common.TypeConnect && nickname == "" {
+		return common.NewChatError(common.ErrUnauthorized, "you must register with CONNECT first")
+	}
 
 	switch msg.Type {
 	case common.TypeConnect:
+		// Ponowny CONNECT po udanej rejestracji zostawiałby stary nick w mapie
+		// klientów wskazujący na to samo połączenie - "duch" na liście użytkowników.
+		if nickname != "" {
+			return common.NewChatError(common.ErrValidation, "already registered")
+		}
+
 		// Handle client connection with nickname
 		if success, err := s.RegisterClient(client, msg.Content); success {
-			ackMsg := common.NewTextMessage("Server", msg.Sender, "Connected successfully")
+			ackMsg := common.NewTextMessage("Server", msg.Content, "Connected successfully")
 			client.SendMessage(ackMsg)
 		} else {
 			errMsg := common.NewErrorMessage("Server", msg.Sender, err.Error())
 			client.SendMessage(errMsg)
-			if err := client.Conn.Close(); err != nil {
-				log.Printf("Error closing connection: %v", err)
-			}
+
+			// Wiadomość jest tylko KOLEJKOWANA, więc natychmiastowe Conn.Close()
+			// prawie zawsze ucinało ją przed wysłaniem i odrzucony użytkownik
+			// widział gołe rozłączenie bez powodu. Dajemy WritePump chwilę na
+			// opróżnienie kolejki.
+			go func() {
+				time.Sleep(100 * time.Millisecond)
+				client.Close()
+			}()
 		}
 
 	case common.TypeText:
 		// Check rate limit
-		if err := s.rateLimiter.CanSendMessage(client.Nickname); err != nil {
-			common.Warn("Rate limit exceeded for %s: %v", client.Nickname, err)
+		if err := s.rateLimiter.CanSendMessage(nickname); err != nil {
+			common.Warn("Rate limit exceeded for %s: %v", nickname, err)
 			errMsg := common.NewErrorMessage("Server", msg.Sender, err.Error())
 			client.SendMessage(errMsg)
 			return nil
@@ -252,23 +280,30 @@ func (s *Server) HandleMessage(client *Client, msg *common.Message) error {
 			return nil
 		}
 
-		// Handle text messages
-		if msg.Recipient == "*" || msg.Recipient == "" {
-			// Broadcast message
-			s.BroadcastMessage(msg, "")
-		} else if msg.Room != "" {
+		// Handle text messages.
+		//
+		// KOLEJNOŚĆ MA ZNACZENIE: test na Room musi być PIERWSZY. Klient
+		// (Connection.SendRoomMessage) ustawia tylko pole Room i zostawia
+		// Recipient puste, więc przy poprzedniej kolejności każda wiadomość
+		// pokojowa wpadała w gałąź `Recipient == ""` i była rozgłaszana do
+		// WSZYSTKICH zalogowanych - a sprawdzenie członkostwa poniżej było
+		// martwym kodem. Prywatne pokoje nie były więc w ogóle prywatne.
+		if msg.Room != "" {
 			// Room message - validate sender is a member
 			if room, exists := s.roomManager.GetRoom(msg.Room); exists {
-				if !room.IsMember(client.Nickname) {
-					errMsg := common.NewErrorMessage("Server", client.Nickname, "You are not a member of this room")
+				if !room.IsMember(nickname) {
+					errMsg := common.NewErrorMessage("Server", nickname, "You are not a member of this room")
 					client.SendMessage(errMsg)
 					return nil
 				}
 				s.roomManager.BroadcastToRoom(s, msg.Room, msg)
 			} else {
-				errMsg := common.NewErrorMessage("Server", client.Nickname, "Room not found")
+				errMsg := common.NewErrorMessage("Server", nickname, "Room not found")
 				client.SendMessage(errMsg)
 			}
+		} else if msg.Recipient == "*" || msg.Recipient == "" {
+			// Broadcast message
+			s.BroadcastMessage(msg, "")
 		} else {
 			// Private message
 			if recipient, ok := s.GetClient(msg.Recipient); ok {
@@ -287,8 +322,8 @@ func (s *Server) HandleMessage(client *Client, msg *common.Message) error {
 		s.BroadcastUserList()
 
 		// Notify about status change
-		statusMsg := common.NewBroadcastMessage("Server", fmt.Sprintf("%s is now %s", client.Nickname, msg.Status))
-		s.BroadcastMessage(statusMsg, client.Nickname)
+		statusMsg := common.NewBroadcastMessage("Server", fmt.Sprintf("%s is now %s", nickname, msg.Status))
+		s.BroadcastMessage(statusMsg, nickname)
 
 	case common.TypeRoom:
 		s.handleRoomMessage(client, msg)
@@ -305,6 +340,18 @@ func (s *Server) HandleMessage(client *Client, msg *common.Message) error {
 	case common.TypeFileChunk:
 		s.handleFileChunk(client, msg)
 
+	case common.TypeAck:
+		// Keep-alive od klienta. Nie wymaga odpowiedzi - samo dotarcie
+		// wiadomości odświeżyło już read deadline w ReadPump. Bez tej gałęzi
+		// keep-alive wpadał w default i wracał jako błąd "unknown message type".
+
+	case common.TypeDisconnect:
+		// Klient wysyła to przy Ctrl-C (client/main.go). Bez tej gałęzi wpadało
+		// w default i odbijało się błędem "unknown message type: DISCONNECT".
+		common.Info("Client %s requested disconnect", nickname)
+		s.UnregisterClient(client)
+		client.Close()
+
 	default:
 		return common.NewChatError(common.ErrValidation, fmt.Sprintf("unknown message type: %s", msg.Type))
 	}
@@ -313,75 +360,89 @@ func (s *Server) HandleMessage(client *Client, msg *common.Message) error {
 
 // handleRoomMessage handles room-related messages
 func (s *Server) handleRoomMessage(client *Client, msg *common.Message) {
+	nickname := client.GetNickname()
+
 	switch msg.Action {
 	case common.RoomCreate:
 		// Check rate limit for room creation
-		if err := s.rateLimiter.CanCreateRoom(client.Nickname); err != nil {
-			errMsg := common.NewErrorMessage("Server", client.Nickname, err.Error())
+		if err := s.rateLimiter.CanCreateRoom(client.GetNickname()); err != nil {
+			errMsg := common.NewErrorMessage("Server", client.GetNickname(), err.Error())
 			client.SendMessage(errMsg)
 			return
 		}
 
 		// Validate room name
 		if err := ValidateRoomName(msg.Content); err != nil {
-			errMsg := common.NewErrorMessage("Server", client.Nickname, err.Error())
+			errMsg := common.NewErrorMessage("Server", client.GetNickname(), err.Error())
 			client.SendMessage(errMsg)
 			return
 		}
 
-		room := s.roomManager.CreateRoom(strings.TrimSpace(msg.Content), client.Nickname)
+		room := s.roomManager.CreateRoom(strings.TrimSpace(msg.Content), client.GetNickname())
 		client.AddRoom(room.ID)
-		s.rateLimiter.AddRoom(client.Nickname)
+		s.rateLimiter.AddRoom(client.GetNickname())
 
 		response := &common.Message{
-			Type:    common.TypeRoom,
-			Action:  common.RoomCreate,
-			Room:    room.ID,
-			Content: fmt.Sprintf("Room '%s' created successfully", room.Name),
+			Type:     common.TypeRoom,
+			Action:   common.RoomCreate,
+			Room:     room.ID,
+			RoomName: room.Name,
+			Content:  fmt.Sprintf("Room '%s' created successfully", room.Name),
 		}
 		client.SendMessage(response)
 
 	case common.RoomJoin:
 		if room, exists := s.roomManager.GetRoom(msg.Room); exists {
-			if !room.IsMember(client.Nickname) {
-				room.AddMember(client.Nickname)
+			// Dołączyć może twórca albo osoba zaproszona. Wcześniej ta gałąź
+			// nie sprawdzała NICZEGO, więc znajomość identyfikatora pokoju
+			// wystarczyła, by wejść do cudzego "prywatnego" pokoju - podczas
+			// gdy handleInviteResponse starannie weryfikuje IsInvited.
+			if room.Creator != nickname && !room.IsInvited(nickname) {
+				errMsg := common.NewErrorMessage("Server", nickname, "You have not been invited to this room")
+				client.SendMessage(errMsg)
+				return
+			}
+			if !room.IsMember(nickname) {
+				room.AddMember(nickname)
 				client.AddRoom(room.ID)
 
 				// Notify room members
-				joinMsg := common.NewTextMessage("Server", "", fmt.Sprintf("%s has joined the room", client.Nickname))
+				joinMsg := common.NewTextMessage("Server", "", fmt.Sprintf("%s has joined the room", client.GetNickname()))
 				joinMsg.Room = msg.Room
 				s.roomManager.BroadcastToRoom(s, msg.Room, joinMsg)
 
 				// Send success message to joiner
 				response := &common.Message{
-					Type:    common.TypeRoom,
-					Action:  common.RoomJoin,
-					Room:    room.ID,
-					Content: fmt.Sprintf("Joined room '%s'", room.Name),
+					Type:     common.TypeRoom,
+					Action:   common.RoomJoin,
+					Room:     room.ID,
+					RoomName: room.Name,
+					Content:  fmt.Sprintf("Joined room '%s'", room.Name),
 				}
 				client.SendMessage(response)
 			}
 		} else {
-			errMsg := common.NewErrorMessage("Server", client.Nickname, "Room not found")
+			errMsg := common.NewErrorMessage("Server", client.GetNickname(), "Room not found")
 			client.SendMessage(errMsg)
 		}
 
 	case common.RoomLeave:
 		if room, exists := s.roomManager.GetRoom(msg.Room); exists {
-			room.RemoveMember(client.Nickname)
+			room.RemoveMember(client.GetNickname())
 			client.RemoveRoom(msg.Room)
 
 			// Send confirmation to the leaving user
 			confirmMsg := &common.Message{
-				Type:    common.TypeRoom,
-				Action:  common.RoomLeaveConfirm,
-				Room:    room.ID,
-				Content: room.Name,
+				Type:     common.TypeRoom,
+				Action:   common.RoomLeaveConfirm,
+				Room:     room.ID,
+				RoomName: room.Name,
+				Content:  fmt.Sprintf("Left room '%s'", room.Name),
 			}
 			client.SendMessage(confirmMsg)
 
 			// Notify room members
-			leaveMsg := common.NewTextMessage("Server", "", fmt.Sprintf("%s has left the room", client.Nickname))
+			leaveMsg := common.NewTextMessage("Server", "", fmt.Sprintf("%s has left the room", client.GetNickname()))
 			leaveMsg.Room = msg.Room
 			s.roomManager.BroadcastToRoom(s, msg.Room, leaveMsg)
 		}
@@ -389,8 +450,8 @@ func (s *Server) handleRoomMessage(client *Client, msg *common.Message) {
 	case common.RoomMembers:
 		if room, exists := s.roomManager.GetRoom(msg.Room); exists {
 			// Check if user is a member
-			if !room.IsMember(client.Nickname) {
-				errMsg := common.NewErrorMessage("Server", client.Nickname, "You are not a member of this room")
+			if !room.IsMember(client.GetNickname()) {
+				errMsg := common.NewErrorMessage("Server", client.GetNickname(), "You are not a member of this room")
 				client.SendMessage(errMsg)
 				return
 			}
@@ -419,29 +480,29 @@ func (s *Server) handleRoomMessage(client *Client, msg *common.Message) {
 			}
 			client.SendMessage(response)
 		} else {
-			errMsg := common.NewErrorMessage("Server", client.Nickname, "Room not found")
+			errMsg := common.NewErrorMessage("Server", client.GetNickname(), "Room not found")
 			client.SendMessage(errMsg)
 		}
 
 	case common.RoomKick:
 		if room, exists := s.roomManager.GetRoom(msg.Room); exists {
 			// Check if user is the room creator
-			if room.Creator != client.Nickname {
-				errMsg := common.NewErrorMessage("Server", client.Nickname, "Only the room creator can kick members")
+			if room.Creator != client.GetNickname() {
+				errMsg := common.NewErrorMessage("Server", client.GetNickname(), "Only the room creator can kick members")
 				client.SendMessage(errMsg)
 				return
 			}
 
 			// Check if target is a member
 			if !room.IsMember(msg.Recipient) {
-				errMsg := common.NewErrorMessage("Server", client.Nickname, fmt.Sprintf("%s is not a member of this room", msg.Recipient))
+				errMsg := common.NewErrorMessage("Server", client.GetNickname(), fmt.Sprintf("%s is not a member of this room", msg.Recipient))
 				client.SendMessage(errMsg)
 				return
 			}
 
 			// Can't kick yourself
-			if msg.Recipient == client.Nickname {
-				errMsg := common.NewErrorMessage("Server", client.Nickname, "You cannot kick yourself")
+			if msg.Recipient == client.GetNickname() {
+				errMsg := common.NewErrorMessage("Server", client.GetNickname(), "You cannot kick yourself")
 				client.SendMessage(errMsg)
 				return
 			}
@@ -455,32 +516,33 @@ func (s *Server) handleRoomMessage(client *Client, msg *common.Message) {
 
 				// Notify the kicked user
 				kickMsg := &common.Message{
-					Type:    common.TypeRoom,
-					Action:  common.RoomLeaveConfirm,
-					Room:    room.ID,
-					Content: fmt.Sprintf("You have been kicked from room '%s'", room.Name),
+					Type:     common.TypeRoom,
+					Action:   common.RoomLeaveConfirm,
+					Room:     room.ID,
+					RoomName: room.Name,
+					Content:  fmt.Sprintf("You have been kicked from room '%s'", room.Name),
 				}
 				kickedClient.SendMessage(kickMsg)
 			}
 
 			// Notify room members
-			kickNotifyMsg := common.NewTextMessage("Server", "", fmt.Sprintf("%s has been kicked from the room by %s", msg.Recipient, client.Nickname))
+			kickNotifyMsg := common.NewTextMessage("Server", "", fmt.Sprintf("%s has been kicked from the room by %s", msg.Recipient, client.GetNickname()))
 			kickNotifyMsg.Room = msg.Room
 			s.roomManager.BroadcastToRoom(s, msg.Room, kickNotifyMsg)
 
 			// Confirm to the kicker
-			confirmMsg := common.NewTextMessage("Server", client.Nickname, fmt.Sprintf("%s has been kicked from the room", msg.Recipient))
+			confirmMsg := common.NewTextMessage("Server", client.GetNickname(), fmt.Sprintf("%s has been kicked from the room", msg.Recipient))
 			client.SendMessage(confirmMsg)
 		} else {
-			errMsg := common.NewErrorMessage("Server", client.Nickname, "Room not found")
+			errMsg := common.NewErrorMessage("Server", client.GetNickname(), "Room not found")
 			client.SendMessage(errMsg)
 		}
 
 	case common.RoomDelete:
 		if room, exists := s.roomManager.GetRoom(msg.Room); exists {
 			// Check if user is the room creator
-			if room.Creator != client.Nickname {
-				errMsg := common.NewErrorMessage("Server", client.Nickname, "Only the room creator can delete the room")
+			if room.Creator != client.GetNickname() {
+				errMsg := common.NewErrorMessage("Server", client.GetNickname(), "Only the room creator can delete the room")
 				client.SendMessage(errMsg)
 				return
 			}
@@ -496,31 +558,37 @@ func (s *Server) handleRoomMessage(client *Client, msg *common.Message) {
 				if memberClient, ok := s.GetClient(member); ok {
 					memberClient.RemoveRoom(msg.Room)
 					leaveMsg := &common.Message{
-						Type:    common.TypeRoom,
-						Action:  common.RoomLeaveConfirm,
-						Room:    room.ID,
-						Content: fmt.Sprintf("Room '%s' has been deleted", room.Name),
+						Type:     common.TypeRoom,
+						Action:   common.RoomLeaveConfirm,
+						Room:     room.ID,
+						RoomName: room.Name,
+						Content:  fmt.Sprintf("Room '%s' has been deleted", room.Name),
 					}
 					memberClient.SendMessage(leaveMsg)
 				}
 			}
 
 			// Remove the room
+			// Zwalniamy limit pokoi twórcy - RateLimiter.RemoveRoom nie było
+			// wołane znikąd, więc licznik roomsPerUser tylko rósł i po
+			// MaxRoomsPerUser użytkownik nie mógł już utworzyć pokoju,
+			// nawet po skasowaniu wszystkich swoich.
+			s.rateLimiter.RemoveRoom(room.Creator)
 			s.roomManager.RemoveRoom(msg.Room)
 
 			// Confirm to the creator
-			confirmMsg := common.NewTextMessage("Server", client.Nickname, fmt.Sprintf("Room '%s' has been deleted", room.Name))
+			confirmMsg := common.NewTextMessage("Server", client.GetNickname(), fmt.Sprintf("Room '%s' has been deleted", room.Name))
 			client.SendMessage(confirmMsg)
 		} else {
-			errMsg := common.NewErrorMessage("Server", client.Nickname, "Room not found")
+			errMsg := common.NewErrorMessage("Server", client.GetNickname(), "Room not found")
 			client.SendMessage(errMsg)
 		}
 
 	case common.RoomSetTopic:
 		if room, exists := s.roomManager.GetRoom(msg.Room); exists {
 			// Check if user is a member
-			if !room.IsMember(client.Nickname) {
-				errMsg := common.NewErrorMessage("Server", client.Nickname, "You must be a member to set the room topic")
+			if !room.IsMember(client.GetNickname()) {
+				errMsg := common.NewErrorMessage("Server", client.GetNickname(), "You must be a member to set the room topic")
 				client.SendMessage(errMsg)
 				return
 			}
@@ -529,15 +597,15 @@ func (s *Server) handleRoomMessage(client *Client, msg *common.Message) {
 			room.SetDescription(msg.Content)
 
 			// Notify all room members
-			topicMsg := common.NewTextMessage("Server", "", fmt.Sprintf("%s set the room topic to: %s", client.Nickname, msg.Content))
+			topicMsg := common.NewTextMessage("Server", "", fmt.Sprintf("%s set the room topic to: %s", client.GetNickname(), msg.Content))
 			topicMsg.Room = msg.Room
 			s.roomManager.BroadcastToRoom(s, msg.Room, topicMsg)
 
 			// Confirm to the setter
-			confirmMsg := common.NewTextMessage("Server", client.Nickname, "Room topic updated")
+			confirmMsg := common.NewTextMessage("Server", client.GetNickname(), "Room topic updated")
 			client.SendMessage(confirmMsg)
 		} else {
-			errMsg := common.NewErrorMessage("Server", client.Nickname, "Room not found")
+			errMsg := common.NewErrorMessage("Server", client.GetNickname(), "Room not found")
 			client.SendMessage(errMsg)
 		}
 	}
@@ -547,14 +615,14 @@ func (s *Server) handleRoomMessage(client *Client, msg *common.Message) {
 func (s *Server) handleInviteMessage(client *Client, msg *common.Message) {
 	room, exists := s.roomManager.GetRoom(msg.Room)
 	if !exists {
-		errMsg := common.NewErrorMessage("Server", client.Nickname, "Room not found")
+		errMsg := common.NewErrorMessage("Server", client.GetNickname(), "Room not found")
 		client.SendMessage(errMsg)
 		return
 	}
 
 	// Check if sender is room member
-	if !room.IsMember(client.Nickname) {
-		errMsg := common.NewErrorMessage("Server", client.Nickname, "You are not a member of this room")
+	if !room.IsMember(client.GetNickname()) {
+		errMsg := common.NewErrorMessage("Server", client.GetNickname(), "You are not a member of this room")
 		client.SendMessage(errMsg)
 		return
 	}
@@ -565,18 +633,18 @@ func (s *Server) handleInviteMessage(client *Client, msg *common.Message) {
 
 		inviteMsg := &common.Message{
 			Type:      common.TypeInvite,
-			Sender:    client.Nickname,
+			Sender:    client.GetNickname(),
 			Recipient: msg.Recipient,
 			Room:      msg.Room,
-			Content:   fmt.Sprintf("%s invited you to join room '%s'", client.Nickname, room.Name),
+			Content:   fmt.Sprintf("%s invited you to join room '%s'", client.GetNickname(), room.Name),
 		}
 		recipient.SendMessage(inviteMsg)
 
 		// Confirm to sender
-		confirmMsg := common.NewTextMessage("Server", client.Nickname, fmt.Sprintf("Invitation sent to %s", msg.Recipient))
+		confirmMsg := common.NewTextMessage("Server", client.GetNickname(), fmt.Sprintf("Invitation sent to %s", msg.Recipient))
 		client.SendMessage(confirmMsg)
 	} else {
-		errMsg := common.NewErrorMessage("Server", client.Nickname, fmt.Sprintf("User %s not found", msg.Recipient))
+		errMsg := common.NewErrorMessage("Server", client.GetNickname(), fmt.Sprintf("User %s not found", msg.Recipient))
 		client.SendMessage(errMsg)
 	}
 }
@@ -585,13 +653,13 @@ func (s *Server) handleInviteMessage(client *Client, msg *common.Message) {
 func (s *Server) handleInviteResponse(client *Client, msg *common.Message) {
 	room, exists := s.roomManager.GetRoom(msg.Room)
 	if !exists {
-		errMsg := common.NewErrorMessage("Server", client.Nickname, "Room no longer exists")
+		errMsg := common.NewErrorMessage("Server", client.GetNickname(), "Room no longer exists")
 		client.SendMessage(errMsg)
 		return
 	}
 
-	if msg.Content == "accept" && room.IsInvited(client.Nickname) {
-		room.AddMember(client.Nickname)
+	if msg.Content == "accept" && room.IsInvited(client.GetNickname()) {
+		room.AddMember(client.GetNickname())
 		client.AddRoom(room.ID)
 
 		// Send room info to the joining user
@@ -608,17 +676,17 @@ func (s *Server) handleInviteResponse(client *Client, msg *common.Message) {
 		client.SendMessage(response)
 
 		// Notify room members
-		joinMsg := common.NewTextMessage("Server", "", fmt.Sprintf("%s has joined the room", client.Nickname))
+		joinMsg := common.NewTextMessage("Server", "", fmt.Sprintf("%s has joined the room", client.GetNickname()))
 		joinMsg.Room = msg.Room
 		s.roomManager.BroadcastToRoom(s, msg.Room, joinMsg)
 	} else if msg.Content == "decline" {
 		// Remove invitation
 		room.mutex.Lock()
-		delete(room.Invitations, client.Nickname)
+		delete(room.Invitations, client.GetNickname())
 		room.mutex.Unlock()
 
 		// Confirm decline
-		confirmMsg := common.NewTextMessage("Server", client.Nickname, "Invitation declined")
+		confirmMsg := common.NewTextMessage("Server", client.GetNickname(), "Invitation declined")
 		client.SendMessage(confirmMsg)
 	}
 }
@@ -626,29 +694,29 @@ func (s *Server) handleInviteResponse(client *Client, msg *common.Message) {
 // handleFileTransferInit initiates a file transfer
 func (s *Server) handleFileTransferInit(client *Client, msg *common.Message) {
 	// Check rate limit for file transfers
-	if err := s.rateLimiter.CanStartFileTransfer(client.Nickname); err != nil {
-		errMsg := common.NewErrorMessage("Server", client.Nickname, err.Error())
+	if err := s.rateLimiter.CanStartFileTransfer(client.GetNickname()); err != nil {
+		errMsg := common.NewErrorMessage("Server", client.GetNickname(), err.Error())
 		client.SendMessage(errMsg)
 		return
 	}
 
 	// Validate file name
 	if err := ValidateFileName(msg.Filename); err != nil {
-		errMsg := common.NewErrorMessage("Server", client.Nickname, err.Error())
+		errMsg := common.NewErrorMessage("Server", client.GetNickname(), err.Error())
 		client.SendMessage(errMsg)
 		return
 	}
 
 	// Validate file size
 	if err := ValidateFileSize(msg.Filesize); err != nil {
-		errMsg := common.NewErrorMessage("Server", client.Nickname, err.Error())
+		errMsg := common.NewErrorMessage("Server", client.GetNickname(), err.Error())
 		client.SendMessage(errMsg)
 		return
 	}
 
 	recipient, exists := s.GetClient(msg.Recipient)
 	if !exists {
-		errMsg := common.NewErrorMessage("Server", client.Nickname, fmt.Sprintf("User %s not found", msg.Recipient))
+		errMsg := common.NewErrorMessage("Server", client.GetNickname(), fmt.Sprintf("User %s not found", msg.Recipient))
 		client.SendMessage(errMsg)
 		return
 	}
@@ -658,7 +726,7 @@ func (s *Server) handleFileTransferInit(client *Client, msg *common.Message) {
 		FileID:         msg.FileID,
 		Filename:       msg.Filename,
 		Filesize:       msg.Filesize,
-		Sender:         client.Nickname,
+		Sender:         client.GetNickname(),
 		Recipient:      msg.Recipient,
 		TotalChunks:    msg.TotalChunks,
 		ReceivedChunks: make(map[int][]byte),
@@ -666,7 +734,7 @@ func (s *Server) handleFileTransferInit(client *Client, msg *common.Message) {
 	}
 
 	s.fileTransfers.Store(msg.FileID, ft)
-	s.rateLimiter.AddFileTransfer(client.Nickname)
+	s.rateLimiter.AddFileTransfer(client.GetNickname())
 
 	// Forward to recipient
 	recipient.SendMessage(msg)
@@ -681,8 +749,19 @@ func (s *Server) handleFileChunk(client *Client, msg *common.Message) {
 
 	ft := value.(*common.FileTransfer)
 
-	// Store chunk using thread-safe method
-	ft.AddChunk(msg.ChunkNum, msg.Data)
+	// Tylko nadawca transferu może dosyłać jego fragmenty. Bez tego dowolny
+	// zalogowany klient, który zna FileID, mógł wstrzykiwać dane w cudzy transfer.
+	if client.GetNickname() != ft.Sender {
+		errMsg := common.NewErrorMessage("Server", client.GetNickname(), "You are not the sender of this transfer")
+		client.SendMessage(errMsg)
+		return
+	}
+
+	// Serwer tylko PRZEKAZUJE fragmenty - nie musi trzymać zawartości pliku.
+	// Wcześniejsze ft.AddChunk(msg.ChunkNum, msg.Data) buforowało w pamięci
+	// serwera całe pliki (do MaxFileSize na transfer), choć nikt tych bajtów
+	// nie odczytywał. Do wykrycia końca wystarczy licznik fragmentów.
+	ft.MarkChunkReceived(msg.ChunkNum)
 
 	// Forward to recipient
 	if recipient, ok := s.GetClient(ft.Recipient); ok {
@@ -698,8 +777,11 @@ func (s *Server) handleFileChunk(client *Client, msg *common.Message) {
 			recipient.SendMessage(completeMsg)
 			client.SendMessage(completeMsg)
 
-			// Clean up
+			// Clean up. Zwolnienie limitu było wołane WYŁĄCZNIE ze ścieżki
+			// timeoutu (cleanup.go), więc po FileTransfersPerUser UDANYCH
+			// transferach użytkownik nie mógł już wysłać nic więcej.
 			s.fileTransfers.Delete(msg.FileID)
+			s.rateLimiter.RemoveFileTransfer(ft.Sender)
 		}
 	}
 }
@@ -748,12 +830,17 @@ func (s *Server) handleShutdown() {
 	// Stop rate limiter
 	s.rateLimiter.Stop()
 
+	// KOLEJNOŚĆ: najpierw sygnał shutdown, POTEM zamknięcie listenera.
+	// Odwrotnie pętla accept dostawała błąd "use of closed network connection",
+	// a jej gałąź default (bo s.shutdown było jeszcze otwarte) logowała go
+	// w kółko, zajmując rdzeń na 100%.
+	close(s.shutdown)
+
 	// Close listener
 	if s.listener != nil {
 		s.listener.Close()
 	}
 
-	close(s.shutdown)
 	common.Info("Server shutdown complete")
 }
 
@@ -776,7 +863,13 @@ func main() {
 	if err := common.InitLogger("server.log", level); err != nil {
 		log.Printf("Failed to initialize logger: %v", err)
 	}
-	defer common.GlobalLogger.Close()
+	// GlobalLogger zostaje nil, gdy InitLogger zawiedzie - bezwarunkowe
+	// GlobalLogger.Close() dereferencjonowało wtedy nil i panikowało przy wyjściu.
+	defer func() {
+		if common.GlobalLogger != nil {
+			common.GlobalLogger.Close()
+		}
+	}()
 
 	common.Info("Starting TCP Chat Server on port %s", *port)
 

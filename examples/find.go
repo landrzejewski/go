@@ -21,13 +21,18 @@ func Find() {
 		return
 	}
 
+	switch *fileType {
+	case "file", "dir", "symlink":
+	default:
+		log.Fatalf("Nieznany typ %q, dozwolone: file, dir, symlink", *fileType)
+	}
+
 	if *path == "" {
 		*path = "."
 	}
 
-	if filepath.Walk(*path, onElement(*fileType, *name)) != nil {
-		log.Fatalf("Error reading file")
-		return
+	if err := filepath.Walk(*path, onElement(*fileType, *name)); err != nil {
+		log.Fatalf("Błąd przeszukiwania %q: %v", *path, err)
 	}
 }
 
@@ -39,8 +44,11 @@ func onElement(fileType, name string) filepath.WalkFunc {
 		if !strings.Contains(info.Name(), name) {
 			return nil
 		}
+		// Uwaga: wcześniej pierwszy case brzmiał `case fileType:`, czyli
+		// porównywał zmienną samą ze sobą - pasował ZAWSZE, przez co gałęzie
+		// "dir" i "symlink" były martwym kodem, a -t dir działało jak -t file.
 		switch fileType {
-		case fileType:
+		case "file":
 			if info.Mode().IsRegular() {
 				fmt.Println(path)
 			}

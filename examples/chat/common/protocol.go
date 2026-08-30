@@ -52,22 +52,26 @@ const (
 
 // Message represents a message in the chat protocol
 type Message struct {
-	Type        MessageType `json:"type"`
-	Sender      string      `json:"sender"`
-	Recipient   string      `json:"recipient,omitempty"` // Empty for broadcast, "*" for all
-	Room        string      `json:"room,omitempty"`
-	Content     string      `json:"content,omitempty"`
-	Status      UserStatus  `json:"status,omitempty"`
-	Action      RoomAction  `json:"action,omitempty"`
-	Filename    string      `json:"filename,omitempty"`
-	Filesize    int64       `json:"filesize,omitempty"`
-	FileID      string      `json:"file_id,omitempty"`
-	ChunkNum    int         `json:"chunk_num,omitempty"`
-	TotalChunks int         `json:"total_chunks,omitempty"`
-	Data        []byte      `json:"data,omitempty"`
-	Users       []string    `json:"users,omitempty"`
-	Timestamp   time.Time   `json:"timestamp"`
-	Error       string      `json:"error,omitempty"`
+	Type      MessageType `json:"type"`
+	Sender    string      `json:"sender"`
+	Recipient string      `json:"recipient,omitempty"` // Empty for broadcast, "*" for all
+	Room      string      `json:"room,omitempty"`
+	// RoomName niesie SAMĄ nazwę pokoju, oddzielnie od Content, w którym
+	// serwer umieszcza pełne zdanie dla użytkownika. Bez tego rozdzielenia
+	// klient zapisywał u siebie komunikat zamiast nazwy.
+	RoomName    string     `json:"roomName,omitempty"`
+	Content     string     `json:"content,omitempty"`
+	Status      UserStatus `json:"status,omitempty"`
+	Action      RoomAction `json:"action,omitempty"`
+	Filename    string     `json:"filename,omitempty"`
+	Filesize    int64      `json:"filesize,omitempty"`
+	FileID      string     `json:"file_id,omitempty"`
+	ChunkNum    int        `json:"chunk_num,omitempty"`
+	TotalChunks int        `json:"total_chunks,omitempty"`
+	Data        []byte     `json:"data,omitempty"`
+	Users       []string   `json:"users,omitempty"`
+	Timestamp   time.Time  `json:"timestamp"`
+	Error       string     `json:"error,omitempty"`
 }
 
 // NewTextMessage creates a new text message
@@ -155,11 +159,21 @@ func (ft *FileTransfer) GetProgress() float64 {
 	return float64(len(ft.ReceivedChunks)) / float64(ft.TotalChunks) * 100
 }
 
-// AddChunk adds a chunk to the file transfer
+// AddChunk adds a chunk to the file transfer (używane po stronie ODBIORCY,
+// który faktycznie składa plik z fragmentów).
 func (ft *FileTransfer) AddChunk(chunkNum int, data []byte) {
 	ft.mutex.Lock()
 	defer ft.mutex.Unlock()
 	ft.ReceivedChunks[chunkNum] = data
+}
+
+// MarkChunkReceived odnotowuje sam FAKT otrzymania fragmentu, bez zapamiętywania
+// jego zawartości. Serwer tylko przekazuje dane dalej, więc trzymanie bajtów
+// oznaczałoby buforowanie całych plików w pamięci bez żadnego powodu.
+func (ft *FileTransfer) MarkChunkReceived(chunkNum int) {
+	ft.mutex.Lock()
+	defer ft.mutex.Unlock()
+	ft.ReceivedChunks[chunkNum] = nil
 }
 
 // GetChunk retrieves a specific chunk

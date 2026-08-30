@@ -15,16 +15,17 @@ type Client struct {
 	id int
 }
 
-type WaitingRoomRequest struct {
-	action   string // "enter", "leave", "check"
-	response chan int
-}
-
 type BarberShop struct {
-	numBarbers        int
-	waitingRoomSize   int
+	numBarbers      int
+	waitingRoomSize int
+	// clientsChan JEST poczekalnią: jego bufor ma dokładnie waitingRoomSize
+	// miejsc. Wcześniejsza wersja trzymała dodatkowo licznik currentSize
+	// w osobnej goroutine - dwa źródła prawdy o tym samym stanie rozjeżdżały
+	// się (klient zwiększał licznik przed wysłaniem do kanału, a fryzjer
+	// zmniejszał go dopiero po odbiorze), przez co klient bywał odsyłany mimo
+	// wolnego miejsca. Tutaj wysyłka z `select`/`default` jest jednocześnie
+	// sprawdzeniem i zajęciem miejsca, więc nie ma okna na wyścig (TOCTOU).
 	clientsChan       chan *Client
-	waitingRoomChan   chan WaitingRoomRequest
 	shopOpenDuration  time.Duration
 	haircutDuration   time.Duration
 	clientArrivalRate time.Duration
@@ -37,33 +38,10 @@ func NewBarberShop(numBarbers, waitingRoomSize int, shopOpenDuration, haircutDur
 		numBarbers:        numBarbers,
 		waitingRoomSize:   waitingRoomSize,
 		clientsChan:       make(chan *Client, waitingRoomSize),
-		waitingRoomChan:   make(chan WaitingRoomRequest),
 		shopOpenDuration:  shopOpenDuration,
 		haircutDuration:   haircutDuration,
 		clientArrivalRate: clientArrivalRate,
 		rand:              rand.New(rand.NewSource(time.Now().UnixNano())),
-	}
-}
-
-func (bs *BarberShop) waitingRoomManager() {
-	currentSize := 0
-	for req := range bs.waitingRoomChan {
-		switch req.action {
-		case "enter":
-			if currentSize < bs.waitingRoomSize {
-				currentSize++
-				req.response <- currentSize
-			} else {
-				req.response <- -1 // Room full
-			}
-		case "leave":
-			if currentSize > 0 {
-				currentSize--
-			}
-			req.response <- currentSize
-		case "check":
-			req.response <- currentSize
-		}
 	}
 }
 
@@ -72,16 +50,12 @@ func (bs *BarberShop) barber(id int) {
 	barber := &Barber{id: id}
 	fmt.Printf("Barber %d: Ready to work\n", id)
 
+	// range po kanale: fryzjer śpi (blokuje się), gdy nie ma klientów, budzi
+	// się na nowego, a kończy dopiero gdy kanał jest zamknięty I pusty -
+	// czyli po zamknięciu zakładu i obsłużeniu całej poczekalni.
 	for client := range bs.clientsChan {
-		// Notify waiting room manager that a client is leaving
-		req := WaitingRoomRequest{
-			action:   "leave",
-			response: make(chan int),
-		}
-		bs.waitingRoomChan <- req
-		currentSize := <-req.response
-
-		fmt.Printf("Barber %d: Cutting hair for client %d (waiting room: %d/%d)\n", barber.id, client.id, currentSize, bs.waitingRoomSize)
+		fmt.Printf("Barber %d: Cutting hair for client %d (waiting room: %d/%d)\n",
+			barber.id, client.id, len(bs.clientsChan), bs.waitingRoomSize)
 		time.Sleep(bs.haircutDuration)
 		fmt.Printf("Barber %d: Finished cutting hair for client %d\n", barber.id, client.id)
 	}
@@ -92,31 +66,12 @@ func (bs *BarberShop) barber(id int) {
 func (bs *BarberShop) addClient(id int) {
 	client := &Client{id: id}
 
-	// Request to enter the waiting room
-	req := WaitingRoomRequest{
-		action:   "enter",
-		response: make(chan int),
-	}
-	bs.waitingRoomChan <- req
-	currentSize := <-req.response
-
-	if currentSize == -1 {
-		fmt.Printf("Client %d: Waiting room full, leaving\n", id)
-		return
-	}
-
+	// Sprawdzenie i zajęcie miejsca w jednej niepodzielnej operacji.
 	select {
 	case bs.clientsChan <- client:
-		fmt.Printf("Client %d: Entered waiting room (seats occupied: %d/%d)\n", id, currentSize, bs.waitingRoomSize)
+		fmt.Printf("Client %d: Entered waiting room (seats occupied: %d/%d)\n",
+			id, len(bs.clientsChan), bs.waitingRoomSize)
 	default:
-		// This shouldn't happen since we already checked, but handle it gracefully
-		// Request to leave since we couldn't actually enter
-		leaveReq := WaitingRoomRequest{
-			action:   "leave",
-			response: make(chan int),
-		}
-		bs.waitingRoomChan <- leaveReq
-		<-leaveReq.response
 		fmt.Printf("Client %d: Waiting room full, leaving\n", id)
 	}
 }
@@ -124,9 +79,6 @@ func (bs *BarberShop) addClient(id int) {
 func (bs *BarberShop) Start() {
 	fmt.Println("Barber shop is opening!")
 	fmt.Printf("Shop configuration: %d barbers, %d waiting room seats\n", bs.numBarbers, bs.waitingRoomSize)
-
-	// Start the waiting room manager
-	go bs.waitingRoomManager()
 
 	for i := 1; i <= bs.numBarbers; i++ {
 		bs.wg.Add(1)
@@ -144,9 +96,12 @@ func (bs *BarberShop) Start() {
 	for shopOpen {
 		select {
 		case <-clientTicker.C:
-			variation := time.Duration(bs.rand.Intn(int(bs.clientArrivalRate / 2)))
-			if variation > 0 {
-				time.Sleep(variation)
+			// rand.Intn panikuje dla n <= 0, więc losujemy tylko wtedy, gdy
+			// przedział jest dodatni.
+			if half := int(bs.clientArrivalRate / 2); half > 0 {
+				if variation := time.Duration(bs.rand.Intn(half)); variation > 0 {
+					time.Sleep(variation)
+				}
 			}
 
 			fmt.Printf("Client %d: Arriving at shop\n", clientID)
@@ -159,11 +114,11 @@ func (bs *BarberShop) Start() {
 		}
 	}
 
+	// Zamknięcie kanału oznacza "koniec przyjęć". Fryzjerzy dokańczają tych,
+	// którzy siedzą już w poczekalni, i dopiero potem wychodzą - zgodnie
+	// z regułą "barbers cannot leave until the waiting room is empty".
 	close(bs.clientsChan)
 	bs.wg.Wait()
-
-	// Close the waiting room channel
-	close(bs.waitingRoomChan)
 
 	fmt.Println("\nAll barbers have gone home. Shop is closed!")
 }

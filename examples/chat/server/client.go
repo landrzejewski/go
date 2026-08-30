@@ -12,15 +12,29 @@ import (
 
 // Client represents a connected client
 type Client struct {
-	ID         string
-	Nickname   string
-	Conn       net.Conn
+	ID       string
+	Conn     net.Conn
+	SendChan chan *common.Message
+	Server   *Server
+
+	// RemoteAddr jest ustawiane raz, przed startem pomp, i dalej tylko czytane.
 	RemoteAddr string
-	Status     common.UserStatus
-	Rooms      map[string]bool
-	SendChan   chan *common.Message
-	Server     *Server
-	mutex      sync.RWMutex
+
+	// Nickname, Status i Rooms są czytane przez goroutines INNYCH klientów
+	// (BroadcastMessage, BroadcastUserList), więc dostęp wyłącznie przez
+	// metody GetNickname/SetNickname, GetStatus/SetStatus itd.
+	Nickname string
+	Status   common.UserStatus
+	Rooms    map[string]bool
+	mutex    sync.RWMutex
+
+	// done zamiast zamykania SendChan. Kanał wysyłkowy zamyka się tylko po
+	// stronie NADAWCY, a nadawców jest tu wielu (każdy klient rozgłaszający
+	// wiadomość). Zamykanie go w Close() powodowało panikę "send on closed
+	// channel", która ubijała cały serwer - select z default chroni wyłącznie
+	// przed pełnym kanałem, nie przed zamkniętym.
+	done      chan struct{}
+	closeOnce sync.Once
 }
 
 // NewClient creates a new client instance
@@ -32,7 +46,22 @@ func NewClient(conn net.Conn, server *Server) *Client {
 		Rooms:    make(map[string]bool),
 		SendChan: make(chan *common.Message, 256),
 		Server:   server,
+		done:     make(chan struct{}),
 	}
+}
+
+// GetNickname returns the client's nickname (safe for concurrent use)
+func (c *Client) GetNickname() string {
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+	return c.Nickname
+}
+
+// SetNickname updates the client's nickname
+func (c *Client) SetNickname(nickname string) {
+	c.mutex.Lock()
+	c.Nickname = nickname
+	c.mutex.Unlock()
 }
 
 // GetStatus returns the client's current status
@@ -70,12 +99,21 @@ func (c *Client) IsInRoom(roomID string) bool {
 	return c.Rooms[roomID]
 }
 
-// SendMessage sends a message to the client
+// SendMessage sends a message to the client.
+// Kanał nigdy nie jest zamykany, więc wysyłka nie może zapanikować; zakończonego
+// klienta rozpoznajemy po zamkniętym done.
 func (c *Client) SendMessage(msg *common.Message) {
 	select {
-	case c.SendChan <- msg:
+	case <-c.done:
+		return
 	default:
-		log.Printf("Client %s send channel full, dropping message", c.Nickname)
+	}
+
+	select {
+	case c.SendChan <- msg:
+	case <-c.done:
+	default:
+		log.Printf("Client %s send channel full, dropping message", c.GetNickname())
 	}
 }
 
@@ -87,7 +125,9 @@ func (c *Client) ReadPump() {
 	}()
 
 	scanner := bufio.NewScanner(c.Conn)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024) // 1MB max message size
+	// Domyślny limit bufio.Scanner to 64 KiB na token - podnosimy go do stałej
+	// współdzielonej z klientem, zamiast wpisywać rozmiar na sztywno.
+	scanner.Buffer(make([]byte, 0, 64*1024), common.MaxScannerBuffer)
 
 	for scanner.Scan() {
 		// Reset read deadline on successful read
@@ -100,26 +140,27 @@ func (c *Client) ReadPump() {
 		}
 
 		// Set sender to client's nickname
-		msg.Sender = c.Nickname
+		msg.Sender = c.GetNickname()
 		msg.Timestamp = time.Now()
 
 		// Handle the message
 		if err := c.Server.HandleMessage(c, msg); err != nil {
-			log.Printf("Error handling message from %s: %v", c.Nickname, err)
+			nickname := c.GetNickname()
+			log.Printf("Error handling message from %s: %v", nickname, err)
 			// Send error message back to client
-			errMsg := common.NewErrorMessage("Server", c.Nickname, err.Error())
+			errMsg := common.NewErrorMessage("Server", nickname, err.Error())
 			c.SendMessage(errMsg)
 		}
 	}
 
 	if err := scanner.Err(); err != nil {
-		log.Printf("Error reading from %s: %v", c.Nickname, err)
+		log.Printf("Error reading from %s: %v", c.GetNickname(), err)
 	}
 }
 
 // WritePump writes messages to the client connection
 func (c *Client) WritePump() {
-	ticker := time.NewTicker(30 * time.Second)
+	ticker := time.NewTicker(common.KeepAliveInterval)
 	defer func() {
 		ticker.Stop()
 		c.Conn.Close()
@@ -127,11 +168,10 @@ func (c *Client) WritePump() {
 
 	for {
 		select {
-		case msg, ok := <-c.SendChan:
-			if !ok {
-				return
-			}
+		case <-c.done:
+			return
 
+		case msg := <-c.SendChan:
 			data, err := msg.Encode()
 			if err != nil {
 				log.Printf("Error encoding message: %v", err)
@@ -142,7 +182,7 @@ func (c *Client) WritePump() {
 			c.Conn.SetWriteDeadline(time.Now().Add(common.WriteTimeout))
 
 			if _, err := c.Conn.Write(append(data, '\n')); err != nil {
-				log.Printf("Error writing to %s: %v", c.Nickname, err)
+				log.Printf("Error writing to %s: %v", c.GetNickname(), err)
 				return
 			}
 
@@ -166,24 +206,32 @@ func (c *Client) WritePump() {
 }
 
 // Start begins the client's read and write pumps
+// Start uruchamia obie pompy i BLOKUJE do ich zakończenia, dzięki czemu
+// wywołujący (handleNewConnection) wie, kiedy połączenie faktycznie się
+// skończyło, i może wtedy zwolnić slot w limiterze.
 func (c *Client) Start() {
-	go c.WritePump()
-	go c.ReadPump()
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		c.WritePump()
+	}()
+	go func() {
+		defer wg.Done()
+		c.ReadPump()
+	}()
+	wg.Wait()
 }
 
-// Close properly closes the client connection and channels
+// Close sygnalizuje zakończenie i zamyka połączenie. Idempotentne dzięki
+// sync.Once - Close bywa wołane i z ReadPump, i z handleShutdown.
+// Nie zamykamy SendChan: zrobiłby to odbiorca, a nadawcy (inni klienci)
+// zapanikowaliby przy próbie wysyłki.
 func (c *Client) Close() {
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
-
-	// Close send channel to signal WritePump to exit
-	if c.SendChan != nil {
-		close(c.SendChan)
-		c.SendChan = nil
-	}
-
-	// Close connection
-	if c.Conn != nil {
-		c.Conn.Close()
-	}
+	c.closeOnce.Do(func() {
+		close(c.done)
+		if c.Conn != nil {
+			c.Conn.Close()
+		}
+	})
 }

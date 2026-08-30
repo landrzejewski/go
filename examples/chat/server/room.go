@@ -16,6 +16,10 @@ type Room struct {
 	Members     map[string]bool
 	Invitations map[string]bool
 	CreatedAt   time.Time
+	// LastEmptyAt to moment, w którym pokój stracił ostatniego członka
+	// (zero, gdy pokój nie jest pusty). Na tym opiera się usuwanie pustych
+	// pokoi - por. CleanupManager.cleanupEmptyRooms.
+	LastEmptyAt time.Time
 	mutex       sync.RWMutex
 }
 
@@ -29,6 +33,8 @@ func NewRoom(name, creator string) *Room {
 		Members:     map[string]bool{creator: true},
 		Invitations: make(map[string]bool),
 		CreatedAt:   time.Now(),
+		// Nowy pokój jest pusty do chwili dodania twórcy jako członka.
+		LastEmptyAt: time.Now(),
 	}
 }
 
@@ -37,6 +43,7 @@ func (r *Room) AddMember(nickname string) {
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
 	r.Members[nickname] = true
+	r.LastEmptyAt = time.Time{} // pokój nie jest już pusty
 	delete(r.Invitations, nickname)
 }
 
@@ -45,6 +52,9 @@ func (r *Room) RemoveMember(nickname string) {
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
 	delete(r.Members, nickname)
+	if len(r.Members) == 0 {
+		r.LastEmptyAt = time.Now()
+	}
 }
 
 // IsMember checks if a user is a member of the room

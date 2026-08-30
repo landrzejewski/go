@@ -46,8 +46,11 @@ func Run() {
 
 func increment(wg *sync.WaitGroup, mutex *sync.Mutex) {
 	defer wg.Done()
-	defer mutex.Unlock()
+	// Idiom: najpierw Lock, dopiero potem defer Unlock. Odwrotna kolejność
+	// działa tu przypadkiem, ale każdy return/panic wstawiony pomiędzy
+	// defer a Lock daje "fatal error: sync: unlock of unlocked mutex".
 	mutex.Lock()
+	defer mutex.Unlock()
 	counter += 1
 }*/
 
@@ -97,17 +100,18 @@ func Run() {
 
 /*// Mutex + Signals
 var (
-	money                 = 100
-	mutex                 = sync.Mutex{}
-	moneyIsGraterThanZero = sync.NewCond(&mutex)
-	spendValue            = 10
+	money = 100
+	mutex = sync.Mutex{}
+	// Nazwa opisuje faktyczny predykat z pętli Wait poniżej: money-spendValue >= 10.
+	enoughMoney = sync.NewCond(&mutex)
+	spendValue  = 10
 )
 
 func spend() {
 	for i := 1; i < 500; i++ {
 		mutex.Lock()
 		for money-spendValue < 10 {
-			moneyIsGraterThanZero.Wait()
+			enoughMoney.Wait()
 		}
 		money -= spendValue
 		fmt.Println("Spend: ", money)
@@ -122,8 +126,10 @@ func work() {
 		mutex.Lock()
 		money += 5
 		fmt.Println("New income, current value:", money)
-		//moneyIsGraterThanZero.Broadcast() // all threads
-		moneyIsGraterThanZero.Signal() // one random thread
+		//enoughMoney.Broadcast() // budzi wszystkie czekające goroutines
+		// Signal budzi JEDNĄ czekającą goroutine - tę czekającą najdłużej
+		// (runtime używa kolejki FIFO), a nie losową. I goroutine, nie wątek.
+		enoughMoney.Signal()
 		mutex.Unlock()
 		time.Sleep(1 * time.Millisecond)
 	}
@@ -135,7 +141,12 @@ func Run() {
 	go spend()
 
 	time.Sleep(10 * time.Second)
-	fmt.Println("Current value:", money)
+	// money jest chronione mutexem, więc także odczyt musi być pod blokadą -
+	// time.Sleep nie jest prymitywem synchronizacji.
+	mutex.Lock()
+	currentMoney := money
+	mutex.Unlock()
+	fmt.Println("Current value:", currentMoney)
 }*/
 
 /*// Deadlocks
@@ -188,8 +199,10 @@ var (
 
 func spend() {
 	for i := 1; i < 500; i++ {
-		atomic.AddInt64(&money, int64(-value))
-		fmt.Println("Spend: ", money)
+		// AddInt64 zwraca nową wartość - używamy jej zamiast czytać `money`
+		// zwykłym odczytem, który byłby wyścigiem (go run -race to zgłasza).
+		current := atomic.AddInt64(&money, int64(-value))
+		fmt.Println("Spend: ", current)
 		time.Sleep(1 * time.Millisecond)
 	}
 	fmt.Println("Spend: Done")
@@ -197,8 +210,8 @@ func spend() {
 
 func work() {
 	for i := 1; i < 500; i++ {
-		atomic.AddInt64(&money, int64(value))
-		fmt.Println("New income, current value:", money)
+		current := atomic.AddInt64(&money, int64(value))
+		fmt.Println("New income, current value:", current)
 		time.Sleep(1 * time.Millisecond)
 	}
 	fmt.Println("Work: Done")
@@ -209,8 +222,17 @@ func Run() {
 	go spend()
 
 	time.Sleep(10 * time.Second)
-	fmt.Println("Current value:", money)
+	// Odczyt zmiennej zapisywanej atomowo też musi być atomowy.
+	fmt.Println("Current value:", atomic.LoadInt64(&money))
 }
+
+// Idiom dla Go 1.19+: typ atomic.Int64 zamiast funkcji atomic.*Int64 na
+// surowej zmiennej - nie da się wtedy przypadkiem odczytać jej nieatomowo:
+//
+//	var money atomic.Int64
+//	money.Store(100)
+//	current := money.Add(-int64(value))
+//	fmt.Println(money.Load())
 */
 
 /*// Cyclic barrier
@@ -236,6 +258,10 @@ func Run() {
 // Semaphore
 func Run() {
 	semaphore := NewSemaphore(5)
+	// UWAGA: od Go 1.22 zmienna pętli ma zakres pojedynczej iteracji, więc
+	// przechwycenie `i` w goroutine poniżej jest POPRAWNE - każda dostanie
+	// własną wartość. We wcześniejszych wersjach wszystkie widziałyby 100
+	// i trzeba było przekazywać i jako argument funkcji.
 	for i := 0; i < 100; i++ {
 		go func() {
 			semaphore.Acquire()

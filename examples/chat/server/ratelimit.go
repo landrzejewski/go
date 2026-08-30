@@ -29,6 +29,8 @@ type RateLimiter struct {
 
 	// Cleanup ticker
 	cleanupTicker *time.Ticker
+	stopChan      chan struct{}
+	stopOnce      sync.Once
 }
 
 type userRateLimit struct {
@@ -45,6 +47,7 @@ func NewRateLimiter() *RateLimiter {
 		roomsPerUser:     make(map[string]int),
 		transfersPerUser: make(map[string]int),
 		cleanupTicker:    time.NewTicker(1 * time.Minute),
+		stopChan:         make(chan struct{}),
 	}
 
 	// Start cleanup routine
@@ -53,10 +56,28 @@ func NewRateLimiter() *RateLimiter {
 	return rl
 }
 
-// CanConnect checks if a new connection is allowed
-func (rl *RateLimiter) CanConnect(addr net.Addr) error {
+// TryAddConnection sprawdza limity I rejestruje połączenie w JEDNEJ operacji
+// pod tą samą blokadą.
+//
+// Rozdzielenie tego na CanConnect (w pętli accept) i AddConnection (w osobnej
+// goroutine) dawało klasyczne TOCTOU: N równoczesnych połączeń widziało stan
+// sprzed inkrementacji i wszystkie przechodziły limit.
+func (rl *RateLimiter) TryAddConnection(addr net.Addr) error {
 	rl.connMutex.Lock()
 	defer rl.connMutex.Unlock()
+
+	if err := rl.canConnectLocked(addr); err != nil {
+		return err
+	}
+
+	rl.totalConnections++
+	ip, _, _ := net.SplitHostPort(addr.String())
+	rl.connectionsByIP[ip]++
+	return nil
+}
+
+// canConnectLocked wymaga trzymania connMutex.
+func (rl *RateLimiter) canConnectLocked(addr net.Addr) error {
 
 	// Check total connections
 	if rl.totalConnections >= common.MaxConnections {
@@ -75,17 +96,6 @@ func (rl *RateLimiter) CanConnect(addr net.Addr) error {
 	}
 
 	return nil
-}
-
-// AddConnection registers a new connection
-func (rl *RateLimiter) AddConnection(addr net.Addr) {
-	rl.connMutex.Lock()
-	defer rl.connMutex.Unlock()
-
-	rl.totalConnections++
-
-	ip, _, _ := net.SplitHostPort(addr.String())
-	rl.connectionsByIP[ip]++
 }
 
 // RemoveConnection removes a connection
@@ -107,7 +117,13 @@ func (rl *RateLimiter) RemoveConnection(addr net.Addr) {
 	}
 }
 
-// CanSendMessage checks if a user can send a message
+// CanSendMessage checks if a user can send a message.
+//
+// UWAGA: to OKNO STAŁE (fixed window), a nie kubełek tokenów. Licznik zeruje
+// się co pełną sekundę od ostatniego resetu, więc na styku dwóch okien można
+// wysłać do 2*MessagesPerSecond wiadomości w bardzo krótkim czasie (10 w chwili
+// t=0.99 s i 10 w t=1.01 s). Dla materiału szkoleniowego to akceptowalne
+// uproszczenie - wygładzenie wymagałoby prawdziwego token bucketa.
 func (rl *RateLimiter) CanSendMessage(nickname string) error {
 	rl.rateMutex.Lock()
 	userLimit, exists := rl.messageRates[nickname]
@@ -130,7 +146,7 @@ func (rl *RateLimiter) CanSendMessage(nickname string) error {
 
 	// Check rate limit
 	if userLimit.messages >= common.MessagesPerSecond {
-		return fmt.Errorf("message rate limit exceeded (%d messages per second)", common.MessagesPerSecond)
+		return fmt.Errorf("message rate limit exceeded (%d messages per 1s window)", common.MessagesPerSecond)
 	}
 
 	userLimit.messages++
@@ -221,21 +237,33 @@ func (rl *RateLimiter) RemoveUser(nickname string) {
 }
 
 // cleanup periodically cleans up old rate limit data
+// cleanup kończy się na zamknięciu stopChan. Samo cleanupTicker.Stop() NIE
+// zamyka kanału C, więc `for range rl.cleanupTicker.C` blokowałby się na zawsze
+// i goroutine wyciekałaby po każdym Stop().
 func (rl *RateLimiter) cleanup() {
-	for range rl.cleanupTicker.C {
-		rl.rateMutex.Lock()
-		for nick, userLimit := range rl.messageRates {
-			userLimit.mutex.Lock()
-			if time.Since(userLimit.lastReset) > 5*time.Minute {
-				delete(rl.messageRates, nick)
+	for {
+		select {
+		case <-rl.stopChan:
+			return
+		case <-rl.cleanupTicker.C:
+			rl.rateMutex.Lock()
+			for nick, userLimit := range rl.messageRates {
+				userLimit.mutex.Lock()
+				if time.Since(userLimit.lastReset) > 5*time.Minute {
+					delete(rl.messageRates, nick)
+				}
+				userLimit.mutex.Unlock()
 			}
-			userLimit.mutex.Unlock()
+			rl.rateMutex.Unlock()
 		}
-		rl.rateMutex.Unlock()
 	}
 }
 
-// Stop stops the rate limiter
+// Stop stops the rate limiter. Idempotentne - close na już zamkniętym kanale
+// zapanikowałoby.
 func (rl *RateLimiter) Stop() {
-	rl.cleanupTicker.Stop()
+	rl.stopOnce.Do(func() {
+		rl.cleanupTicker.Stop()
+		close(rl.stopChan)
+	})
 }

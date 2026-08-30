@@ -32,16 +32,22 @@ func (ft *FileTransfer) SendFile(recipient, filePath string) error {
 	if err != nil {
 		return fmt.Errorf("failed to open file: %v", err)
 	}
-	defer file.Close()
+	// UWAGA: NIE ma tu `defer file.Close()`. SendFile wraca natychmiast po
+	// wystartowaniu goroutine sendFileChunks, więc defer zamknąłby plik, zanim
+	// ta zdążyłaby cokolwiek przeczytać ("file already closed"), a Close
+	// zostałby wywołany dwa razy. Właścicielem deskryptora jest goroutine;
+	// na ścieżkach błędu poniżej zamykamy go jawnie.
 
 	// Get file info
 	fileInfo, err := file.Stat()
 	if err != nil {
+		file.Close()
 		return fmt.Errorf("failed to get file info: %v", err)
 	}
 
 	// Check if it's a directory
 	if fileInfo.IsDir() {
+		file.Close()
 		return fmt.Errorf("cannot send directory as file")
 	}
 
@@ -52,6 +58,7 @@ func (ft *FileTransfer) SendFile(recipient, filePath string) error {
 
 	// Validate file size
 	if filesize > common.MaxFileSize {
+		file.Close()
 		return fmt.Errorf("file size exceeds maximum allowed size of %d bytes", common.MaxFileSize)
 	}
 
@@ -94,8 +101,10 @@ func (ft *FileTransfer) SendFile(recipient, filePath string) error {
 }
 
 // sendFileChunks sends file chunks
+// sendFileChunks sends file chunks. Goroutine jest jedynym właścicielem
+// deskryptora, więc to ona go zamyka.
 func (ft *FileTransfer) sendFileChunks(file *os.File, fileID, recipient string, totalChunks int) {
-	defer file.Close() // Ensure file is always closed
+	defer file.Close()
 
 	buffer := make([]byte, common.FileChunkSize)
 	chunkNum := 0
@@ -111,6 +120,14 @@ func (ft *FileTransfer) sendFileChunks(file *os.File, fileID, recipient string, 
 			break
 		}
 
+		// Kopia fragmentu. Wiadomość jest tylko KOLEJKOWANA - writePump
+		// serializuje ją później, w innej goroutine, gdy pętla nadpisała już
+		// `buffer` kolejnym odczytem. Współdzielenie bufora było wyścigiem
+		// i psuło zawartość pliku u odbiorcy (time.Sleep niżej jedynie to
+		// maskował).
+		chunk := make([]byte, n)
+		copy(chunk, buffer[:n])
+
 		// Send chunk
 		chunkMsg := &common.Message{
 			Type:        common.TypeFileChunk,
@@ -118,7 +135,7 @@ func (ft *FileTransfer) sendFileChunks(file *os.File, fileID, recipient string, 
 			FileID:      fileID,
 			ChunkNum:    chunkNum,
 			TotalChunks: totalChunks,
-			Data:        buffer[:n],
+			Data:        chunk,
 			Timestamp:   time.Now(),
 		}
 
@@ -135,6 +152,15 @@ func (ft *FileTransfer) sendFileChunks(file *os.File, fileID, recipient string, 
 
 	// File transfer complete
 	ft.notifyComplete(fileID)
+}
+
+// IsIncoming mówi, czy dany transfer jest transferem PRZYCHODZĄCYM.
+// Serwer wysyła FileComplete obu stronom, a tylko odbiorca ma co zapisywać.
+func (ft *FileTransfer) IsIncoming(fileID string) bool {
+	ft.conn.mutex.RLock()
+	defer ft.conn.mutex.RUnlock()
+	transfer, exists := ft.conn.fileTransfers[fileID]
+	return exists && transfer.IsIncoming
 }
 
 // ReceiveFile saves a received file
@@ -167,13 +193,30 @@ func (ft *FileTransfer) ReceiveFile(fileID string) error {
 	}
 	defer file.Close()
 
-	// Write chunks in order
-	for i := 0; i < transfer.TotalChunks; i++ {
+	// Migawka fragmentów pod blokadą. Do tej samej mapy pisze goroutine
+	// readPump (Connection.handleFileChunk), a ReceiveFile wołane jest
+	// z goroutine interfejsu - jednoczesny odczyt i zapis mapy to wyścig,
+	// a w skrajnym przypadku "fatal error: concurrent map read and map write".
+	transfer.mutex.Lock()
+	totalChunks := transfer.TotalChunks
+	chunks := make([][]byte, totalChunks)
+	missing := -1
+	for i := 0; i < totalChunks; i++ {
 		chunk, exists := transfer.Chunks[i]
 		if !exists {
-			return fmt.Errorf("missing chunk %d", i)
+			missing = i
+			break
 		}
+		chunks[i] = chunk
+	}
+	transfer.mutex.Unlock()
 
+	if missing >= 0 {
+		return fmt.Errorf("missing chunk %d", missing)
+	}
+
+	// Write chunks in order
+	for _, chunk := range chunks {
 		if _, err := file.Write(chunk); err != nil {
 			return fmt.Errorf("failed to write chunk: %v", err)
 		}

@@ -15,6 +15,11 @@ func (s *Stack[T]) Pop() (T, bool) {
 	}
 	lastIndex := s.Size() - 1
 	element := s.data[lastIndex]
+	// Przycięcie slice'a zmniejsza tylko len - zdjęty element nadal jest
+	// osiągalny przez tablicę bazową, więc GC nie może go zwolnić. Dla
+	// Stack[*T] czy Stack[string] to realny wyciek pamięci, stąd wyzerowanie.
+	var zero T
+	s.data[lastIndex] = zero
 	s.data = s.data[:lastIndex] // [0:lastIndex)
 	return element, true
 }

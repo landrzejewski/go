@@ -15,42 +15,52 @@ func Cat() {
 	paths := flag.Args()
 
 	if len(paths) == 0 || (*numberLines && *numberNonEmptyLines) {
-		fmt.Println("Usage: cat [-n|-nb] path, path ...")
-		os.Exit(0)
+		// Błąd użycia idzie na stderr i kończy się kodem != 0 - inaczej skrypt
+		// wywołujący cat nie odróżni pomyłki od poprawnego, pustego wyniku.
+		fmt.Fprintln(os.Stderr, "Usage: cat [-n|-nb] path, path ...")
+		os.Exit(2)
 	}
 
+	// Jeden printer na cały przebieg: numeracja jest ciągła przez wszystkie
+	// pliki, tak jak w cat(1).
 	printerFn := printerFactory(*numberLines, *numberNonEmptyLines)
 
 	for _, path := range paths {
 		fmt.Printf("File: %s\n", path)
 		if err := cat(path, printerFn); err != nil {
-			log.Fatal("Error reading path: ", path)
+			log.Fatalf("Błąd odczytu %q: %v", path, err)
 		}
 	}
 }
 
-type printer = func(int, string)
+// printer dostaje sam wiersz - licznik jest stanem wewnętrznym konkretnej
+// implementacji. Wcześniej licznik żył w funkcji cat i rósł dla KAŻDEGO
+// wiersza, a wariant -nb jedynie ukrywał numer przy pustych wierszach.
+// Dla wejścia "a\n\nb\n" dawało to 1, (pusty), 3 zamiast poprawnego 1, (pusty), 2.
+type printer = func(string)
 
-func printerFactory(numberLines, numberNonEmptyLines bool) (printerFn printer) {
+func printerFactory(numberLines, numberNonEmptyLines bool) printer {
+	lineNumber := 0
 	switch {
 	case numberLines:
-		printerFn = func(lineNumber int, line string) {
+		return func(line string) {
+			lineNumber++
 			fmt.Printf("%6d: %s\n", lineNumber, line)
 		}
 	case numberNonEmptyLines:
-		printerFn = func(lineNumber int, line string) {
-			if line != "" {
-				fmt.Printf("%6d: %s\n", lineNumber, line)
-			} else {
+		return func(line string) {
+			if line == "" {
 				fmt.Println(line)
+				return
 			}
+			lineNumber++
+			fmt.Printf("%6d: %s\n", lineNumber, line)
 		}
 	default:
-		printerFn = func(lineNumber int, line string) {
+		return func(line string) {
 			fmt.Println(line)
 		}
 	}
-	return printerFn
 }
 
 func cat(path string, printerFn printer) error {
@@ -58,17 +68,20 @@ func cat(path string, printerFn printer) error {
 	if err != nil {
 		return err
 	}
-	defer func(file *os.File) {
-		if file.Close() != nil {
-			log.Fatal("Error closing file: ", file)
+	// log.Fatal w defer wywołuje os.Exit i pomija wszystkie pozostałe defery,
+	// więc błąd zamknięcia tylko logujemy.
+	defer func() {
+		if err := file.Close(); err != nil {
+			log.Printf("Błąd zamykania %q: %v", path, err)
 		}
-	}(file)
+	}()
+
 	scanner := bufio.NewScanner(file)
-	lineNumber := 0
 	for scanner.Scan() {
-		line := scanner.Text()
-		lineNumber++
-		printerFn(lineNumber, line)
+		printerFn(scanner.Text())
 	}
-	return nil
+	// Scan zwraca false także przy błędzie I/O oraz przy wierszu dłuższym niż
+	// bufio.MaxScanTokenSize (64 KiB) - bez tego obcięte wyjście wyglądałoby
+	// jak poprawnie odczytany plik.
+	return scanner.Err()
 }

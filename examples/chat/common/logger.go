@@ -67,6 +67,9 @@ func InitLogger(filename string, level LogLevel) error {
 
 // Close closes the log file
 func (l *Logger) Close() error {
+	if l == nil || l.file == nil {
+		return nil
+	}
 	if l.file != nil {
 		return l.file.Close()
 	}
@@ -102,10 +105,10 @@ func (l *Logger) log(level LogLevel, format string, args ...interface{}) {
 		log.Println(logLine)
 	}
 
-	// Fatal exits the program
-	if level == LogFatal {
-		os.Exit(1)
-	}
+	// UWAGA dydaktyczna: os.Exit NIE uruchamia odroczonych wywołań, więc
+	// deferred Unlock w tej metodzie nigdy się nie wykona. Tutaj jest to
+	// nieszkodliwe (proces i tak kończy pracę), ale to typowa pułapka.
+	// Samo wyjście przeniesione do funkcji Fatal - patrz komentarz tam.
 }
 
 // Debug logs a debug message
@@ -136,11 +139,19 @@ func Error(format string, args ...interface{}) {
 	}
 }
 
-// Fatal logs a fatal message and exits
+// Fatal logs a fatal message and exits.
+//
+// os.Exit musi być TUTAJ, a nie w Logger.log: gdy inicjalizacja loggera
+// zawiodła i GlobalLogger jest nil, poprzednia wersja nie logowała niczego
+// ANI nie kończyła programu - main wracał normalnie i proces kończył się
+// kodem 0 mimo błędu krytycznego.
 func Fatal(format string, args ...interface{}) {
 	if GlobalLogger != nil {
 		GlobalLogger.log(LogFatal, format, args...)
+	} else {
+		log.Printf("[FATAL] "+format, args...)
 	}
+	os.Exit(1)
 }
 
 // GetMetrics returns logging metrics

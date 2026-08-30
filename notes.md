@@ -1,6 +1,8 @@
 1. Zaimplementuj strukturę monetaryAmount, która opisuje wartości walutowe (kwota, waluta).
    Struktura powinna umożliwiać dodawanie i odejmowanie innych wartości walutowych (metody add, subtract).
-   Obsłuż wyjątek wynikający z próby wykonania operacji na różnych walutach. Dodaj funkcję konstruktora.
+   Zasygnalizuj błąd (zwróć wartość typu error) przy próbie wykonania operacji na różnych walutach.
+   Uwaga: Go nie ma wyjątków - błędy są zwykłymi wartościami zwracanymi jako ostatni wynik funkcji,
+   a panic/recover nie służy do obsługi spodziewanych sytuacji. Dodaj funkcję konstruktora.
 
 2. W pakiecie common, zaimplementuj stos, przechowujący elementy typu int, oferujący operacje Push, Pop, Size.
 
@@ -21,7 +23,9 @@
      zezwala na opcjonalne numerowanie wierszy (przełącznik -n),
      numerowanie wierszy można wyłączyć dla pustych wierszy (przełącznik -nb)
    - find - przeszukuje i drukuje ścieżki plików i/lub katalogów, których nazwy pasują do wskazanego wzorca i typu,
-     dozwolone typy to plik, katalog lub link symboliczny ("path/filepath" => filepath.Walk)
+     dozwolone typy to plik, katalog lub link symboliczny ("path/filepath" => filepath.WalkDir;
+     filepath.Walk nadal działa, ale od Go 1.16 zalecany jest WalkDir - dostaje fs.DirEntry
+     zamiast fs.FileInfo, więc unika wywołania stat dla każdego pliku)
    - grep - wyszukuje i drukuje wiersze zawierające wskazany tekst/wzorzec ze wskazanych plików/ścieżek
 
 6. Bazując na pakiecie https://pkg.go.dev/net oraz wiedzy dotyczącej go routines/channels zbuduj czat pozwalający na:
@@ -46,9 +50,7 @@
    The Sleeping Barber was originally proposed in 1965 by computer science pioneer Edsger Dijkstra.
    https://en.wikipedia.org/wiki/Sleeping_barber_problem
 
-8. Stwórsz bazę danych opartą o plik płaski przechowującą dane w postaci binarnej (https://gobyexample.com/reading-files).
-   Baza powinna umożliwiać wykonywanie następujących operacje: ADD, READ, UPDATE, DELETE na podstwie podango id rekordu.
-   W celu uzyskania lepszej wydajnoci, wprowadź indeksowanie pozycji rekordu w pliku i/lub pamięć podręczną.
-   Pomyśl o optymalnym sposobie usuwania rekordów i ponownym wykorzystaniem miejsca po usuniętym rekordzie.   
-
-https://sages.link/924710
+8. Stwórz bazę danych opartą o plik płaski przechowującą dane w postaci binarnej (https://gobyexample.com/reading-files).
+   Baza powinna umożliwiać wykonywanie następujących operacji: ADD, READ, UPDATE, DELETE na podstawie podanego id rekordu.
+   W celu uzyskania lepszej wydajności, wprowadź indeksowanie pozycji rekordu w pliku i/lub pamięć podręczną.
+   Pomyśl o optymalnym sposobie usuwania rekordów i ponownym wykorzystaniem miejsca po usuniętym rekordzie.

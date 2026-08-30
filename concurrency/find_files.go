@@ -2,36 +2,57 @@ package concurrency
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
+	"sync"
 )
 
+// FindFiles buduje potok (pipeline) z trzech etapów:
+//
+//	findFiles -> filterByExtension -> filterByContent
+//
+// Zasada, którą pokazuje ten przykład: kanał zamyka WYŁĄCZNIE nadawca i tylko
+// wtedy, gdy jest jedynym nadawcą. Kiedy nadawców jest wielu (tutaj dwie
+// goroutines wołające findFiles), czekamy na nich przez sync.WaitGroup
+// i zamykamy kanał dopiero po ich zakończeniu.
 func FindFiles() {
 	files := make(chan string, 10)
 	filesWithExtension := make(chan string)
 	filesWithContent := make(chan string)
 
-	go findFiles(".\\common", files)
-	go findFiles(".\\concurrency", files)
+	// Etap 1: dwóch nadawców pisze do tego samego kanału, więc żaden z nich
+	// nie może go zamknąć samodzielnie - robi to osobna goroutine po wg.Wait().
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		findFiles("./common", files)
+	}()
+	go func() {
+		defer wg.Done()
+		findFiles("./concurrency", files)
+	}()
+	go func() {
+		wg.Wait()
+		close(files)
+	}()
 
-	go filterByExtension(files, filesWithExtension, ".go")
-	go filterByContent(filesWithExtension, filesWithContent, "package concurrency")
+	// Etapy 2 i 3: każdy ma dokładnie jednego nadawcę, więc zamyka swój kanał sam.
+	go func() {
+		defer close(filesWithExtension)
+		filterByExtension(files, filesWithExtension, ".go")
+	}()
+	go func() {
+		defer close(filesWithContent)
+		filterByContent(filesWithExtension, filesWithContent, "package concurrency")
+	}()
 
-	done := false
-	for !done {
-		select {
-		case file := <-filesWithContent:
-			fmt.Println(file)
-		case <-time.After(1 * time.Second):
-			done = true
-		}
+	// Pętla kończy się, gdy ostatni etap zamknie kanał - bez sztucznego timeoutu.
+	for file := range filesWithContent {
+		fmt.Println(file)
 	}
-
-	close(files)
-	close(filesWithExtension)
-	close(filesWithContent)
 }
 
 func findFiles(path string, files chan<- string) {
@@ -44,8 +65,10 @@ func findFiles(path string, files chan<- string) {
 		}
 		return nil
 	})
+	// panic w goroutine ubija cały proces i nie da się go przechwycić
+	// w funkcji wywołującej - logujemy i kończymy tylko ten etap.
 	if err != nil {
-		panic(err)
+		log.Printf("Błąd przeszukiwania %s: %v", path, err)
 	}
 }
 

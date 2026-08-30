@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strings"
 	"tcp-chat/common"
+	"unicode/utf8"
 )
 
 var (
@@ -16,27 +17,37 @@ var (
 
 // ValidateNickname validates a nickname according to the rules
 func ValidateNickname(nickname string) error {
-	if len(nickname) < common.MinNicknameLength {
+	// utf8.RuneCountInString, a nie len(): len liczy BAJTY, więc limit "20
+	// znaków" oznaczałby w praktyce ~6 znaków CJK albo 10 polskich z ogonkami.
+	length := utf8.RuneCountInString(nickname)
+	if length < common.MinNicknameLength {
 		return fmt.Errorf("nickname must be at least %d characters long", common.MinNicknameLength)
 	}
-	if len(nickname) > common.MaxNicknameLength {
+	if length > common.MaxNicknameLength {
 		return fmt.Errorf("nickname cannot exceed %d characters", common.MaxNicknameLength)
 	}
 	if !nicknameRegex.MatchString(nickname) {
 		return errors.New("nickname can only contain letters, numbers, underscores, and hyphens")
 	}
+	// "Server" jest nadawcą wszystkich komunikatów systemowych - bez tego
+	// zastrzeżenia dowolny użytkownik mógł się pod serwer podszyć.
+	if strings.EqualFold(nickname, "Server") {
+		return errors.New("nickname 'Server' is reserved")
+	}
 	return nil
 }
 
-// ValidateRoomName validates a room name according to the rules
+// ValidateRoomName validates a room name according to the rules.
+// UWAGA: TrimSpace działa tylko na lokalnej kopii - walidujemy tę samą postać,
+// którą zapisuje wywołujący (handleRoomMessage też robi TrimSpace).
 func ValidateRoomName(roomName string) error {
-	// Trim leading and trailing spaces
 	roomName = strings.TrimSpace(roomName)
 
-	if len(roomName) < common.MinRoomNameLength {
+	length := utf8.RuneCountInString(roomName)
+	if length < common.MinRoomNameLength {
 		return fmt.Errorf("room name must be at least %d characters long", common.MinRoomNameLength)
 	}
-	if len(roomName) > common.MaxRoomNameLength {
+	if length > common.MaxRoomNameLength {
 		return fmt.Errorf("room name cannot exceed %d characters", common.MaxRoomNameLength)
 	}
 	if !roomNameRegex.MatchString(roomName) {
@@ -50,8 +61,11 @@ func ValidateMessage(content string) error {
 	if len(content) == 0 {
 		return errors.New("message cannot be empty")
 	}
+	// MaxMessageSize jest limitem w BAJTACH (chroni bufor odczytu), więc
+	// komunikat też mówi o bajtach - inaczej wprowadzałby w błąd przy tekstach
+	// spoza ASCII.
 	if len(content) > common.MaxMessageSize {
-		return fmt.Errorf("message cannot exceed %d characters", common.MaxMessageSize)
+		return fmt.Errorf("message cannot exceed %d bytes", common.MaxMessageSize)
 	}
 	return nil
 }

@@ -59,11 +59,15 @@ func NewConnection(nickname string) *Connection {
 
 // Connect establishes connection to the server
 func (c *Connection) Connect(address string) error {
-	// Cancel any existing goroutines
+	// Cancel any existing goroutines. c.cancel jest czytane pod c.mutex
+	// w Disconnect(), więc podmiana też musi odbyć się pod blokadą.
+	c.mutex.Lock()
 	if c.cancel != nil {
 		c.cancel()
 	}
 	c.ctx, c.cancel = context.WithCancel(context.Background())
+	ctx := c.ctx
+	c.mutex.Unlock()
 
 	// Set connection timeout
 	conn, err := net.DialTimeout("tcp", address, common.ConnectionTimeout)
@@ -80,12 +84,6 @@ func (c *Connection) Connect(address string) error {
 	conn.SetReadDeadline(time.Now().Add(common.ReadTimeout))
 	conn.SetWriteDeadline(time.Now().Add(common.WriteTimeout))
 
-	// Signal that we're connected
-	select {
-	case c.connectedChan <- true:
-	default:
-	}
-
 	// Send connection message with nickname
 	connectMsg := &common.Message{
 		Type:    common.TypeConnect,
@@ -97,9 +95,18 @@ func (c *Connection) Connect(address string) error {
 		return err
 	}
 
-	// Start read and write pumps with context
-	go c.readPump(c.ctx)
-	go c.writePump(c.ctx)
+	// Sygnał dopiero PO udanej wysyłce CONNECT - wcześniej WaitForConnection()
+	// mogło wrócić także wtedy, gdy sendMessage następnie zawiodło.
+	select {
+	case c.connectedChan <- true:
+	default:
+	}
+
+	// Start read and write pumps with context.
+	// ctx i conn przekazujemy jako wartości pobrane wcześniej pod blokadą -
+	// czytanie c.ctx / c.conn tutaj byłoby wyścigiem z ponownym Connect().
+	go c.readPump(ctx, conn)
+	go c.writePump(ctx)
 
 	return nil
 }
@@ -205,7 +212,9 @@ func (c *Connection) SendRoomMessage(roomID, content string) {
 
 // ChangeStatus updates user status
 func (c *Connection) ChangeStatus(status common.UserStatus) {
+	c.mutex.Lock()
 	c.status = status
+	c.mutex.Unlock()
 	msg := common.NewStatusMessage(c.nickname, status)
 	c.sendChan <- msg
 }
@@ -311,14 +320,16 @@ func (c *Connection) GetMessages() <-chan *common.Message {
 }
 
 // readPump reads messages from the server
-func (c *Connection) readPump(ctx context.Context) {
+// readPump dostaje net.Conn parametrem zamiast czytać pole c.conn, które
+// Connect() zapisuje pod c.mutex - inaczej byłby to wyścig danych.
+func (c *Connection) readPump(ctx context.Context, conn net.Conn) {
 	defer func() {
 		c.SetConnected(false)
-		c.conn.Close()
+		conn.Close()
 	}()
 
-	scanner := bufio.NewScanner(c.conn)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	scanner := bufio.NewScanner(conn)
+	scanner.Buffer(make([]byte, 0, 64*1024), common.MaxScannerBuffer)
 
 	for scanner.Scan() {
 		// Check if context is cancelled
@@ -329,7 +340,7 @@ func (c *Connection) readPump(ctx context.Context) {
 		}
 
 		// Reset read deadline on successful read
-		c.conn.SetReadDeadline(time.Now().Add(common.ReadTimeout))
+		conn.SetReadDeadline(time.Now().Add(common.ReadTimeout))
 
 		data := scanner.Bytes()
 		msg, err := common.DecodeMessage(data)
@@ -340,9 +351,23 @@ func (c *Connection) readPump(ctx context.Context) {
 
 		// Handle file chunks separately
 		if msg.Type == common.TypeFileChunk {
-			c.handleFileChunk(msg)
+			c.handleFileChunk(ctx, msg)
 		} else {
-			c.receiveChan <- msg
+			// Wiadomość inicjująca niesie nazwę pliku, rozmiar i liczbę
+			// fragmentów - same fragmenty już nie. Bez zarejestrowania
+			// transferu tutaj rekord powstawał dopiero z pierwszego fragmentu,
+			// z PUSTĄ nazwą, przez co zapis kończył się błędem
+			// "invalid filename".
+			if msg.Type == common.TypeFile {
+				c.registerIncomingTransfer(msg)
+			}
+			// select z ctx.Done(): gdyby interfejs przestał odbierać, samo
+			// `c.receiveChan <- msg` blokowałoby tę goroutine na zawsze.
+			select {
+			case c.receiveChan <- msg:
+			case <-ctx.Done():
+				return
+			}
 		}
 	}
 
@@ -370,9 +395,18 @@ func (c *Connection) writePump(ctx context.Context) {
 			}
 
 		case <-ticker.C:
-			// Keep alive
-			if c.conn != nil {
-				c.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+			// Faktyczny keep-alive: SERWER resetuje swój read deadline dopiero
+			// po udanym odczycie, więc trzeba mu coś WYSŁAĆ. Samo ustawienie
+			// write deadline (poprzednia wersja) nie wysyłało nic, przez co
+			// milczący użytkownik był rozłączany po ReadTimeout (60 s).
+			keepAlive := &common.Message{
+				Type:      common.TypeAck,
+				Sender:    c.nickname,
+				Timestamp: time.Now(),
+			}
+			if err := c.sendMessage(keepAlive); err != nil {
+				log.Printf("Keep-alive error: %v", err)
+				return
 			}
 		}
 	}
@@ -400,8 +434,27 @@ func (c *Connection) sendMessage(msg *common.Message) error {
 	return err
 }
 
+// registerIncomingTransfer zapisuje metadane transferu przychodzącego,
+// zanim dotrą jego fragmenty.
+func (c *Connection) registerIncomingTransfer(msg *common.Message) {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	if _, exists := c.fileTransfers[msg.FileID]; exists {
+		return
+	}
+	c.fileTransfers[msg.FileID] = &FileTransferProgress{
+		FileID:      msg.FileID,
+		Filename:    msg.Filename,
+		Filesize:    msg.Filesize,
+		IsIncoming:  true,
+		StartTime:   time.Now(),
+		Chunks:      make(map[int][]byte),
+		TotalChunks: msg.TotalChunks,
+	}
+}
+
 // handleFileChunk processes incoming file chunks
-func (c *Connection) handleFileChunk(msg *common.Message) {
+func (c *Connection) handleFileChunk(ctx context.Context, msg *common.Message) {
 	c.mutex.Lock()
 	transfer, exists := c.fileTransfers[msg.FileID]
 	if !exists {
@@ -421,27 +474,36 @@ func (c *Connection) handleFileChunk(msg *common.Message) {
 
 	// Store chunk with transfer-specific lock
 	transfer.mutex.Lock()
+	// Fragment może dotrzeć, zanim zdążyliśmy przetworzyć wiadomość inicjującą.
+	if transfer.TotalChunks == 0 && msg.TotalChunks > 0 {
+		transfer.TotalChunks = msg.TotalChunks
+	}
 	transfer.Chunks[msg.ChunkNum] = msg.Data
-	transfer.Progress = float64(len(transfer.Chunks)) / float64(transfer.TotalChunks) * 100
-	chunkCount := len(transfer.Chunks)
+	// Zabezpieczenie przed dzieleniem przez zero (dawało +Inf w komunikacie).
+	if transfer.TotalChunks > 0 {
+		transfer.Progress = float64(len(transfer.Chunks)) / float64(transfer.TotalChunks) * 100
+	}
+	// Progress i Filename też są chronione tą blokadą, więc odczytujemy je
+	// wewnątrz sekcji krytycznej, a nie po Unlock.
+	progress := transfer.Progress
+	filename := transfer.Filename
 	transfer.mutex.Unlock()
 
 	// Forward to UI for progress display
 	progressMsg := &common.Message{
 		Type:     common.TypeFileChunk,
 		FileID:   msg.FileID,
-		Filename: transfer.Filename,
-		Content:  fmt.Sprintf("%.1f%%", transfer.Progress),
+		Filename: filename,
+		Content:  fmt.Sprintf("%.1f%%", progress),
 	}
-	c.receiveChan <- progressMsg
+	select {
+	case c.receiveChan <- progressMsg:
+	case <-ctx.Done():
+		return
+	}
 
-	// Check if complete
-	if chunkCount == transfer.TotalChunks {
-		completeMsg := &common.Message{
-			Type:     common.TypeFileComplete,
-			FileID:   msg.FileID,
-			Filename: transfer.Filename,
-		}
-		c.receiveChan <- completeMsg
-	}
+	// Zakończenie sygnalizuje SERWER (TypeFileComplete). Wcześniej klient
+	// dokładał własny komunikat, więc plik był "odbierany" dwa razy - za drugim
+	// razem rekord transferu już nie istniał i użytkownik widział mylące
+	// "Error saving file: file transfer not found".
 }
