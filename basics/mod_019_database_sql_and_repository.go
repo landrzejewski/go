@@ -1,8 +1,10 @@
 package basics
 
 import (
+	"cmp"
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"fmt"
 	"os"
@@ -55,8 +57,9 @@ func m019DSN() string {
 /*
 ## sql.DB Is a Pool, Not a Connection
 
-- **`sql.Open` does not connect.** It validates the DSN, finds the registered driver and returns a
-  `*sql.DB` — a *pool* that opens connections lazily, on first use. So `sql.Open` succeeding tells
+- **`sql.Open` does not connect.** It looks up the registered driver and returns a `*sql.DB` — a
+  *pool* that opens connections lazily, on first use. With `lib/pq` even the DSN is only parsed
+  when the first connection is opened, so `sql.Open` succeeding tells
   you almost nothing, and a program that only calls `Open` at startup discovers a wrong password on
   its first request instead of at boot.
 - **`db.PingContext(ctx)` is what actually connects.** Call it once at startup, with a timeout, and
@@ -94,7 +97,7 @@ func m019Connect() (*sql.DB, error) {
 func m019PoolBasics(db *sql.DB) {
 	fmt.Println("--- Section 1: sql.DB Is a Pool, Not a Connection ---")
 
-	fmt.Println("  sql.Open validates the DSN and returns a POOL; it does not connect")
+	fmt.Println("  sql.Open looks up the driver and returns a POOL; it does not connect")
 	fmt.Println("  db.PingContext is what connects - call it once at startup, with a timeout")
 
 	// sql.Open succeeds even for a database that does not exist, which is the point.
@@ -216,8 +219,9 @@ The `Rows` contract has four parts and skipping any of them is a bug:
 	}
 	return rows.Err()              // 3. Next returning false may mean an ERROR, not just "done"
 
-Forgetting `rows.Close()` leaks a pooled connection until the garbage collector runs a finalizer,
-and a handler that does it on every request exhausts the pool within minutes. Forgetting
+Forgetting `rows.Close()` holds a pooled connection until the query's context is cancelled or the
+process exits (`database/sql` sets no finalizer on `Rows`), and a handler that does it on every
+request exhausts the pool within minutes. Forgetting
 `rows.Err()` silently turns a mid-iteration network failure into "no more rows" — a truncated
 result set that looks like success.
 
@@ -385,16 +389,22 @@ func m019ParametersAndInjection(ctx context.Context, db *sql.DB) {
 		// An IN clause needs = any($1), not in ($1).
 		rows, err := db.QueryContext(ctx,
 			`select name from m019_users where id = any($1) order by id`, m019Int64Array{1, 2})
-		if err == nil {
+		if err != nil {
+			fmt.Println("  query with an array parameter failed:", err)
+		} else {
 			defer rows.Close()
 			var names []string
 			for rows.Next() {
 				var n string
-				if err := rows.Scan(&n); err == nil {
-					names = append(names, n)
+				if err := rows.Scan(&n); err != nil {
+					fmt.Println("  scan failed:", err)
+					break
 				}
+				names = append(names, n)
 			}
-			if err := rows.Err(); err == nil {
+			if err := rows.Err(); err != nil {
+				fmt.Println("  iteration failed:", err)
+			} else {
 				fmt.Printf("  `where id = any($1)` binds a whole list: %v\n", names)
 			}
 		}
@@ -424,16 +434,18 @@ func m019SafeColumn(name string) (string, error) {
 // (github.com/lib/pq offers pq.Array for this; hand-rolling it shows what it does.)
 type m019Int64Array []int64
 
-func (a m019Int64Array) Value() (driverValue, error) {
+// driver.Value is a DEFINED type (`type Value any`), not an alias, so the method must name it
+// exactly - `Value() (any, error)` would not satisfy the interface. The blank assignment below
+// makes the compiler check that.
+var _ driver.Valuer = m019Int64Array(nil)
+
+func (a m019Int64Array) Value() (driver.Value, error) {
 	parts := make([]string, len(a))
 	for i, v := range a {
 		parts[i] = fmt.Sprint(v)
 	}
 	return "{" + strings.Join(parts, ",") + "}", nil
 }
-
-// driverValue aliases database/sql/driver.Value so the import list stays short.
-type driverValue = any
 
 // =================================================================================================
 // Section 5: NULL, and Mapping Errors
@@ -542,12 +554,12 @@ func m019TranslateError(err error) error {
 		return nil
 	}
 	if errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("%w", m009ErrNotFound)
+		return m009ErrNotFound
 	}
 	// lib/pq reports a unique violation as SQLSTATE 23505. Matching on the string keeps this
 	// module free of a pq import; real code uses errors.As with *pq.Error.
 	if strings.Contains(err.Error(), "23505") || strings.Contains(err.Error(), "duplicate key") {
-		return fmt.Errorf("%w", m019ErrDuplicate)
+		return m019ErrDuplicate
 	}
 	return err
 }
@@ -568,7 +580,7 @@ func m019TranslateError(err error) error {
 - **`defer tx.Rollback()` immediately after `BeginTx`** is the idiom. After a successful `Commit`
   the rollback returns `sql.ErrTxDone` and changes nothing, so it is safe — and it guarantees that
   every early return, and every panic, releases the transaction. Without it, an early `return err`
-  leaks the connection until the finalizer runs.
+  holds the connection for as long as the transaction lives.
 - A `*sql.Tx` **holds exactly one connection** for its whole life. Two consequences: keep
   transactions short, and **never** use the parent `db` inside one — those queries go to a different
   connection and are not part of the transaction.
@@ -797,7 +809,7 @@ func (r *m019MemoryRepo) List(ctx context.Context) ([]m019User, error) {
 	for _, u := range r.users {
 		out = append(out, u)
 	}
-	slices.SortFunc(out, func(a, b m019User) int { return int(a.ID - b.ID) })
+	slices.SortFunc(out, func(a, b m019User) int { return cmp.Compare(a.ID, b.ID) })
 	return out, nil
 }
 

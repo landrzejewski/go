@@ -70,7 +70,7 @@ const (
 // m001bConstantsSummary is called from module 001a Section 2 to show that package-level identifiers
 // are visible across all files of a package.
 func m001bConstantsSummary() string {
-	return fmt.Sprintf("module 001b defines %d constants, e.g. CurrentYear=%d", 5, m001bCurrentYear)
+	return fmt.Sprintf("module 001b defines 5 constants in its first block, e.g. CurrentYear=%d", m001bCurrentYear)
 }
 
 func m001bConstants() {
@@ -185,7 +185,7 @@ func (d m001bWeekday) String() string {
 // Byte sizes: the whole expression repeats, so the shift grows with iota.
 // Note these constants are deliberately left UNTYPED, so they can be used wherever
 // a numeric type is expected. Giving them a defined type would force a conversion
-// at every use - see the float64() calls that would otherwise not be needed.
+// at every use.
 const (
 	_       = iota             // skip 0; the line still advances iota
 	m001bKB = 1 << (10 * iota) // 1 << 10

@@ -434,7 +434,8 @@ func m003BitwiseOperators() {
 /*
 ## Operator Precedence and Associativity
 
-Go has only **five** precedence levels for binary operators — Rust has twelve, C has fifteen. The
+Go has only **five** precedence levels for binary operators — Rust has twelve, and C's full table
+has fifteen levels (unary, ternary, assignment included). The
 whole table fits in a few lines, and every binary operator is **left-associative**.
 
 	5 (highest)  *   /   %   <<   >>   &   &^
@@ -469,7 +470,6 @@ func m003PrecedenceAndAssociativity() {
 
 	// Level 5 beats level 4.
 	fmt.Printf("2 + 3*4     = %d   (* before +)\n", 2+3*4)
-	fmt.Printf("1 + 2<<3    = %d   (<< is level 5, so it happens first: 1 + 16)\n", 1+2<<3)
 	fmt.Printf("6 & 3 + 1   = %d   (& is level 5: (6&3) + 1 = 2 + 1)\n", 6&3+1)
 
 	// The C trap that does NOT exist in Go: & binds tighter than ==.
@@ -481,7 +481,7 @@ func m003PrecedenceAndAssociativity() {
 	// The Go traps that C programmers really do not expect: << is TIGHTER than +
 	// in Go but looser in C, and ^ (XOR) sits at level 4 in Go but much lower in C.
 	fmt.Printf("1 + 2<<3    = %d  (Go: 1 + (2<<3) = 17; C would give (1+2)<<3 = 24)\n", 1+2<<3)
-	fmt.Printf("3 ^ 5 + 1   = %d   (Go: 3 ^ (5+1) = 7; C would give (3^5) + 1 = 5)\n", 3^5+1)
+	fmt.Printf("3 ^ 5 + 1   = %d   (Go: (3^5) + 1 = 7; C would give 3 ^ (5+1) = 5)\n", 3^5+1)
 
 	// Comparisons are looser than arithmetic, tighter than && and ||.
 	a, b, c, d := 1, 2, 3, 4

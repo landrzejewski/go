@@ -153,7 +153,7 @@ func m015Dependencies() {
 	fmt.Println("\n--- Section 2: Dependencies, Tools and Workspaces ---")
 
 	fmt.Printf("  this toolchain: %s on %s/%s\n", runtime.Version(), runtime.GOOS, runtime.GOARCH)
-	fmt.Printf("  GOPATH: %s\n", build.Default.GOPATH)
+	fmt.Printf("  GOPATH: %s (in practice: `go env GOPATH`)\n", build.Default.GOPATH)
 
 	fmt.Println()
 	fmt.Println("  go get pkg@latest / @v1.2.3 / @none")
@@ -404,7 +404,7 @@ func m015FormattingAndLinting() {
 		{"copylocks", "a sync.Mutex copied by value"},
 		{"lostcancel", "a context.CancelFunc not called on every path"},
 		{"structtag", "a malformed struct tag"},
-		{"unusedresult", "discarding the result of append, fmt.Sprintf, errors.New"},
+		{"unusedresult", "discarding the result of fmt.Sprintf, errors.New, strings.ToUpper"},
 		{"loopclosure", "capturing a loop variable (mostly moot since Go 1.22)"},
 	} {
 		fmt.Printf("    %-13s %s\n", c.name, c.what)
@@ -491,6 +491,9 @@ func m015Profiling() {
 }
 
 func m015CurrentGCPercent() int {
+	// There is no getter: the set-and-restore round-trip is the only way through runtime/debug.
+	// It perturbs the runtime (each call can trigger a GC), so it is fine for a demo but not for
+	// production monitoring - read the "/gc/gogc:percent" sample via runtime/metrics instead.
 	current := debug.SetGCPercent(100) // returns the previous value
 	debug.SetGCPercent(current)        // put it back immediately
 	return current

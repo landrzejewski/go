@@ -472,8 +472,8 @@ func m001aScopeAndBlocks() {
 - Go's predeclared identifiers live in the **universe block**, so they can be shadowed too:
   `len`, `cap`, `new`, `make`, `copy`, `close`, `delete`, `min`, `max`, `clear`, `panic`, `recover`,
   `append`, `print`, and the type names `int`, `string`, `error`, `any`. They are not keywords. This
-  is why `main.go` in this repo has a note explaining that naming a helper `close` would shadow the
-  builtin `close` **for the whole package** and break every channel close in it.
+  is why a package-level helper named `close` is a bad idea: it would shadow the builtin `close`
+  **for the whole package** and break every channel close in it — prefer a name like `cleanup`.
 - The dangerous case is the **shadowed `err`**. Inside an `if` or a nested block, `err := ...`
   creates a *new* `err` and the assignment to the outer one never happens — so the outer `err` stays
   nil and the error is silently swallowed. This is the single most common Go bug of its kind.
@@ -525,7 +525,7 @@ func m001aShadowing() {
 	fmt.Println("builtin len works again here:", len("abc"))
 
 	// A package-level shadow is far worse: it hides the builtin for EVERY file of the package.
-	// That is why this repo's cleanup helper is called `cleanup` and not `close`.
+	// That is why a resource-releasing helper should be called `cleanup` rather than `close`.
 	fmt.Println("shadowing a builtin at package level breaks it for the whole package")
 }
 

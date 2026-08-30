@@ -2,7 +2,7 @@ package concurrency
 
 import "sync"
 
-// Barrier is a cyclic barrier: Wait() blocks until `total` participants have
+// Barrier is a cyclic barrier: Wait blocks until `total` participants have
 // arrived, then releases them all at once and re-arms itself for the next round.
 type Barrier struct {
 	total int
@@ -29,6 +29,9 @@ func NewBarrier(size int) *Barrier {
 	return b
 }
 
+// Wait blocks the caller until all participants of the current round have
+// called Wait, then returns in every one of them. The barrier can then be used
+// again for the next round.
 func (b *Barrier) Wait() {
 	b.mutex.Lock()
 	defer b.mutex.Unlock()

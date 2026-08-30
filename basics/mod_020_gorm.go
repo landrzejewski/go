@@ -271,10 +271,13 @@ func m020ConnectingAndMigrating(ctx context.Context, db *gorm.DB) {
 	// gorm.Open returns (*gorm.DB, error) like every other constructor that can fail:
 	//	db := gorm.Open(postgres.Open(m019DSN())) // ERROR: assignment mismatch: 1 variable but gorm.Open returns 2 values
 
-	// Start from a clean slate so the module is idempotent.
-	_ = db.Migrator().DropTable("m020_user_tags", &m020Order{}, &m020Tag{}, &m020User{})
+	// Start from a clean slate so the module is idempotent. Schema changes run on a session with
+	// PrepareStmt OFF: a statement cached before DropTable/AutoMigrate would otherwise make
+	// Postgres fail with "cached plan must not change result type" when it is re-run.
+	migrate := db.Session(&gorm.Session{PrepareStmt: false, Context: ctx})
+	_ = migrate.Migrator().DropTable("m020_user_tags", &m020Order{}, &m020Tag{}, &m020User{})
 
-	if err := db.WithContext(ctx).AutoMigrate(&m020User{}, &m020Order{}, &m020Tag{}); err != nil {
+	if err := migrate.AutoMigrate(&m020User{}, &m020Order{}, &m020Tag{}); err != nil {
 		fmt.Println("  AutoMigrate failed:", err)
 		return
 	}
@@ -440,9 +443,10 @@ The query builder chains, and each call returns a new `*gorm.DB`:
 	db.Joins("JOIN orders ON orders.user_id = users.id").Where("orders.amount > ?", 500).Find(&users)
 	db.Raw("select * from users where id = ?", id).Scan(&u)   // when the chain fights you
 
-**Chains are immutable but sessions are not.** Reusing a `*gorm.DB` that already has conditions on
-it silently accumulates them — a classic source of "why is this query filtering by something I
-removed". Start from `db.Session(&gorm.Session{})`, or from `db.Model(...)` each time.
+**A reused `*gorm.DB` accumulates conditions.** Once a chain method such as `Where` has been called
+on a `*gorm.DB`, further calls on that same value keep adding to it — a classic source of "why is
+this query filtering by something I removed". Only a fresh value is safe to build on: the root
+`db`, `db.WithContext(ctx)`, or `db.Session(&gorm.Session{})` each start a new, independent chain.
 
 ### The N+1 problem
 
@@ -508,9 +512,13 @@ func m020QueryingAndPreload(ctx context.Context, db *gorm.DB) {
 		len(slim), m020FirstEmail(slim))
 
 	// --- N+1, counted ---
+	// Callbacks are registered on the *gorm.DB's shared callback table, which is GLOBAL to every
+	// session derived from that connection - this counter stays installed after the demo.
 	var counted int
 	countingDB := tx.Session(&gorm.Session{}).Callback().Query().After("gorm:query")
-	_ = countingDB.Register("m020:count", func(d *gorm.DB) { counted++ })
+	if err := countingDB.Register("m020:count", func(d *gorm.DB) { counted++ }); err != nil {
+		fmt.Println("  registering the query callback failed:", err)
+	}
 
 	var users []m020User
 	counted = 0
@@ -875,10 +883,12 @@ func m020TranslateError(err error) error {
 		return nil
 	}
 	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return fmt.Errorf("%w", m009ErrNotFound)
+		return m009ErrNotFound
 	}
+	// String matching is a dependency-free stand-in. The real form is
+	// `var pgErr *pgconn.PgError; errors.As(err, &pgErr) && pgErr.Code == "23505"`.
 	if strings.Contains(err.Error(), "23505") || strings.Contains(err.Error(), "duplicate key") {
-		return fmt.Errorf("%w", m019ErrDuplicate)
+		return m019ErrDuplicate
 	}
 	return err
 }

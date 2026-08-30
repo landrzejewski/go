@@ -347,9 +347,10 @@ Inside the *bubble* created by `synctest.Test`:
     catch up", and which is the single biggest source of flaky Go tests.
   - **`synctest.Sleep(d)`** (**Go 1.27**) advances the fake clock by `d` and then waits, combining
     the two operations that were almost always written together.
-  - The bubble **must be fully drained**: if a goroutine started inside it is still running when the
-    function returns, `synctest.Test` panics. That is a feature — it turns a goroutine leak into a
-    test failure.
+  - When the function returns, `synctest.Test` **waits for every goroutine started inside the
+    bubble to exit**. If one of them is blocked forever (a leaked goroutine waiting on a channel
+    nobody will ever write to), the bubble is deadlocked and the test **fails**. That is a
+    feature — it turns a goroutine leak into a test failure.
 
 Caveats: only goroutines started *inside* the bubble are bubbled, and real I/O (a network call, a
 file read) blocks for real and will deadlock the fake clock. Use it for logic that is concurrent,
@@ -366,7 +367,7 @@ func m014Synctest() {
 	fmt.Println("    a one-hour timeout test runs in microseconds and measures exactly an hour")
 	fmt.Println("    synctest.Wait() waits until every other goroutine is durably blocked")
 	fmt.Println("    synctest.Sleep(d) (Go 1.27) advances the clock and then waits")
-	fmt.Println("    a goroutine still running at the end makes the test PANIC - leaks become failures")
+	fmt.Println("    Test waits for every bubbled goroutine to exit; a deadlocked one FAILS the test")
 	fmt.Println()
 	fmt.Println("  it replaces every `time.Sleep(100*time.Millisecond) // let it catch up`,")
 	fmt.Println("  which is the biggest single source of flaky Go tests")
@@ -385,7 +386,7 @@ func m014Synctest() {
 
 	go test -cover ./...
 	go test -coverprofile=cover.out ./... && go tool cover -html=cover.out
-	go test -covermode=atomic ./...        # required when combined with -race
+	go test -covermode=atomic ./...        # selected automatically under -race; explicit here
 
 Coverage is a **diagnostic, not a target**. It tells you what is definitely untested; it says
 nothing about whether the covered lines are tested *well*. Chasing 100% produces tests that assert

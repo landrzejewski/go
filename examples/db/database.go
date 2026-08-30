@@ -1,9 +1,16 @@
+// Package db is a flat-file database that stores gob-encoded records in one
+// binary file and keeps an in-memory index (id -> offset, length) that is
+// persisted next to it. Every operation goes through a single goroutine, so
+// Database is safe for concurrent use without further locking.
+//
+// DatabaseTest runs the operations once; DatabaseExercise exposes them as a
+// small HTTP API.
 package db
 
 import (
+	"context"
+	"errors"
 	"fmt"
-	"github.com/gin-gonic/gin"
-	"io"
 	"log"
 	"net/http"
 	"os"
@@ -11,10 +18,20 @@ import (
 	"strconv"
 	"sync"
 	"syscall"
+	"time"
+
+	"github.com/gin-gonic/gin"
+
 	"training.pl/go/examples/common"
 )
 
 const stateFileSuffix = ".state"
+
+// Sentinel errors returned by the CRUD operations; test them with errors.Is.
+var (
+	ErrNotFound      = errors.New("db: record not found")
+	ErrAlreadyExists = errors.New("db: record already exists")
+)
 
 // Typed constants instead of bare strings: a typo in an action name is now a
 // compile error rather than a silently dropped command (the caller would then
@@ -33,81 +50,96 @@ type command struct {
 	id     int64
 	input  any
 	output any
-	reply  chan *Result
+	reply  chan result
 }
 
-type Result struct {
-	Record *Record
-	Error  error
+type result struct {
+	record *Record
+	err    error
 }
 
+// Record describes where one value lives in the data file.
 type Record struct {
-	Id     int64
+	ID     int64
 	Offset int64
 	Length int64
 }
 
+// Database is a handle to an open data file. Create it with Open and release
+// it with Close.
 type Database struct {
 	file        *os.File
 	commands    chan command
-	state       *DatabaseState
+	state       *databaseState
 	idGenerator IDGenerator
 	// done is closed by run() once the command channel has been drained - that is
 	// how Close() knows nobody is still writing to the file or to state.
 	done chan struct{}
-	// closeOnce keeps Close idempotent: DatabaseExercise calls it both from the
-	// signal goroutine and from a defer, and close() on an already closed channel
-	// panics.
+	// closeOnce keeps Close idempotent: DatabaseExercise may call it both from
+	// the shutdown path and from a defer, and close() on an already closed
+	// channel panics.
 	closeOnce sync.Once
+	closeErr  error
 }
 
-type DatabaseState struct {
+// databaseState is the index persisted in the .state file. Its fields are
+// exported because encoding/gob ignores unexported ones.
+type databaseState struct {
 	Records map[int64]*Record
-	LastId  int64
+	LastID  int64
 }
 
 // NOTE ON A KNOWN LIMITATION: space is never reclaimed. delete removes only the
-// index entry, and update always appends at endOffset(), so the file grows without
-// bound. Exercise 8 in notes.md asks for reuse of freed space - implementing it
-// means keeping a free list of (offset, length) holes and picking one that fits,
-// plus compaction when fragmentation gets bad.
+// index entry, and update always appends at the end of the file, so the file
+// grows without bound. Exercise 8 in notes.md asks for reuse of freed space -
+// implementing it means keeping a free list of (offset, length) holes and
+// picking one that fits, plus compaction when fragmentation gets bad.
 
-func Db(filepath string, idGenerator IDGenerator) *Database {
-	file, err := os.OpenFile(filepath, os.O_CREATE|os.O_RDWR, 0644)
-	catchFatal(err, "Failed to open database")
-	var state DatabaseState
-	bytes, err := os.ReadFile(filepath + stateFileSuffix)
+// Open opens (or creates) the data file at path and loads the index stored in
+// path + ".state". The id generator is seeded from the index so that numbering
+// continues where the previous run stopped.
+func Open(path string, gen IDGenerator) (*Database, error) {
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o644)
 	if err != nil {
-		state = DatabaseState{Records: make(map[int64]*Record), LastId: 0}
-	} else {
-		catchFatal(common.FromBytes(bytes, &state), "Failed reading database state")
+		return nil, fmt.Errorf("db: opening %s: %w", path, err)
 	}
-	// Seed the generator from the stored state. Without this LastId was a dead
-	// field - written to disk but never read back - and Sequence restarted from
-	// zero on every run. After a restart ids began at 1 again and either hit
-	// "record with id 1 already exists" or silently overwrote an existing record.
-	idGenerator.seed(state.LastId)
 
-	return &Database{
+	state := &databaseState{Records: make(map[int64]*Record)}
+	data, err := os.ReadFile(path + stateFileSuffix)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		// A fresh database: no index yet.
+	case err != nil:
+		file.Close()
+		return nil, fmt.Errorf("db: reading state: %w", err)
+	default:
+		if err := common.FromBytes(data, state); err != nil {
+			file.Close()
+			return nil, fmt.Errorf("db: decoding state: %w", err)
+		}
+		if state.Records == nil {
+			state.Records = make(map[int64]*Record)
+		}
+	}
+	// Seed the generator from the stored state. Without this LastID was a dead
+	// field - written to disk but never read back - and Sequence restarted from
+	// zero on every run, so after a restart ids collided with existing records.
+	gen.seed(state.LastID)
+
+	d := &Database{
 		file:        file,
 		commands:    make(chan command, 100),
-		state:       &state,
-		idGenerator: idGenerator,
+		state:       state,
+		idGenerator: gen,
 		done:        make(chan struct{}),
 	}
+	go d.run()
+	return d, nil
 }
 
-// catchFatal calls log.Fatal, which is acceptable only because this package is
-// demo code with its own entry points. A real library returns errors instead of
-// terminating its caller's process.
-func catchFatal(err error, description string) {
-	if err != nil {
-		log.Fatal(description + ": " + err.Error())
-	}
-}
-
-// Close is safe to call more than once.
-func (d *Database) Close() {
+// Close drains pending commands, persists the index and closes the data file.
+// It is safe to call more than once; later calls return the first result.
+func (d *Database) Close() error {
 	d.closeOnce.Do(func() {
 		// close(d.commands) on its own does NOT wait for run() - without <-d.done
 		// the run goroutine could still be writing to the file and mutating state
@@ -119,180 +151,169 @@ func (d *Database) Close() {
 
 		// Order matters: save the state first (it uses d.file.Name()), then close
 		// the file.
-		catchFatal(d.saveState(), "Save database state failed")
-		catchFatal(d.file.Close(), "Close database file failed")
+		d.closeErr = errors.Join(d.saveState(), d.file.Close())
 	})
+	return d.closeErr
 }
 
 func (d *Database) saveState() error {
-	bytes, err := common.ToBytes(d.state)
+	data, err := common.ToBytes(d.state)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(d.file.Name()+stateFileSuffix, bytes, 0644)
+	return os.WriteFile(d.file.Name()+stateFileSuffix, data, 0o644)
 }
 
+// run is the only goroutine that touches the file and the index.
 func (d *Database) run() {
 	defer close(d.done)
 	for cmd := range d.commands {
+		var record *Record
+		var err error
 		switch cmd.action {
 		case actionInsert:
-			cmd.reply <- d.create(cmd.input)
+			record, err = d.create(cmd.input)
 		case actionFind:
-			cmd.reply <- d.read(cmd.id, cmd.output)
+			record, err = d.read(cmd.id, cmd.output)
 		case actionUpdate:
-			cmd.reply <- d.update(cmd.id, cmd.input)
+			record, err = d.update(cmd.id, cmd.input)
 		case actionDelete:
-			cmd.reply <- d.delete(cmd.id)
+			err = d.delete(cmd.id)
 		default:
 			// Without this branch an unknown action produced no reply and the
 			// caller blocked on <-reply forever.
-			cmd.reply <- &Result{nil, fmt.Errorf("unknown action %q", cmd.action)}
+			err = fmt.Errorf("db: unknown action %q", cmd.action)
 		}
+		cmd.reply <- result{record, err}
 	}
 }
 
-func (d *Database) create(object any) *Result {
-	bytes, err := common.ToBytes(object)
+// appendBytes writes data at the end of the file and returns its offset.
+func (d *Database) appendBytes(data []byte) (offset int64, err error) {
+	info, err := d.file.Stat()
 	if err != nil {
-		return &Result{Record: nil, Error: err}
+		return 0, err
 	}
-	offset, err := d.endOffset()
+	offset = info.Size()
+	if _, err := d.file.WriteAt(data, offset); err != nil {
+		return 0, err
+	}
+	return offset, nil
+}
+
+func (d *Database) create(object any) (*Record, error) {
+	data, err := common.ToBytes(object)
 	if err != nil {
-		return &Result{Record: nil, Error: err}
+		return nil, err
 	}
-	id := d.idGenerator.next()
-	_, exists := d.state.Records[id]
-	if exists {
-		return &Result{nil, fmt.Errorf("record with id %d already exists", id)}
+	// Peek before consuming the id: a failed insert must not burn a number.
+	id := d.idGenerator.peek()
+	if _, exists := d.state.Records[id]; exists {
+		return nil, fmt.Errorf("%w: id %d", ErrAlreadyExists, id)
 	}
-	length, err := d.file.WriteAt(bytes, offset)
+	offset, err := d.appendBytes(data)
 	if err != nil {
-		return &Result{Record: nil, Error: err}
+		return nil, err
 	}
-	record := &Record{id, offset, int64(length)}
+	id = d.idGenerator.next()
+	record := &Record{ID: id, Offset: offset, Length: int64(len(data))}
 	d.state.Records[id] = record
-	d.state.LastId = id // persisted by saveState below - see Db()
+	d.state.LastID = id
 	if err := d.saveState(); err != nil {
-		return &Result{Record: nil, Error: err}
+		// Keep the index consistent with what is on disk in the .state file.
+		delete(d.state.Records, id)
+		return nil, err
 	}
-	return &Result{record, nil}
+	return record, nil
 }
 
-func (d *Database) read(id int64, object any) *Result {
+func (d *Database) read(id int64, object any) (*Record, error) {
 	record, exists := d.state.Records[id]
 	if !exists {
-		return &Result{nil, fmt.Errorf("record with id %d not found", id)}
+		return nil, fmt.Errorf("%w: id %d", ErrNotFound, id)
 	}
-	bytes := make([]byte, record.Length)
-	_, err := d.file.ReadAt(bytes, record.Offset)
-	if err != nil {
-		return &Result{Record: nil, Error: err}
+	data := make([]byte, record.Length)
+	if _, err := d.file.ReadAt(data, record.Offset); err != nil {
+		return nil, err
 	}
-	err = common.FromBytes(bytes, object)
-	if err != nil {
-		return &Result{Record: nil, Error: err}
+	if err := common.FromBytes(data, object); err != nil {
+		return nil, err
 	}
-	return &Result{record, nil}
+	return record, nil
 }
 
-func (d *Database) delete(id int64) *Result {
-	_, exists := d.state.Records[id]
+func (d *Database) delete(id int64) error {
+	record, exists := d.state.Records[id]
 	if !exists {
-		return &Result{nil, fmt.Errorf("record with id %d not found", id)}
+		return fmt.Errorf("%w: id %d", ErrNotFound, id)
 	}
 	delete(d.state.Records, id)
 	if err := d.saveState(); err != nil {
-		return &Result{nil, err}
+		d.state.Records[id] = record
+		return err
 	}
-	return &Result{nil, nil}
+	return nil
 }
 
-func (d *Database) update(id int64, object any) *Result {
-	bytes, err := common.ToBytes(object)
-	if err != nil {
-		return &Result{nil, err}
-	}
-	record, exists := d.state.Records[id]
+func (d *Database) update(id int64, object any) (*Record, error) {
+	old, exists := d.state.Records[id]
 	if !exists {
-		return &Result{nil, fmt.Errorf("record with id %d not found", id)}
+		return nil, fmt.Errorf("%w: id %d", ErrNotFound, id)
 	}
-	offset, err := d.endOffset()
+	data, err := common.ToBytes(object)
 	if err != nil {
-		return &Result{nil, err}
+		return nil, err
 	}
-	length, err := d.file.WriteAt(bytes, offset)
+	offset, err := d.appendBytes(data)
 	if err != nil {
-		return &Result{nil, err}
+		return nil, err
 	}
-	record.Offset = offset
-	record.Length = int64(length)
-	// Without saving the state (which create and delete already do) the on-disk
-	// index pointed at the old offset/length while the new bytes sat at the end of
-	// the file - any crash lost the update and left the index pointing at garbage.
+	// Build the new record first and swap it into the index only once the
+	// on-disk index has been written: a failed saveState leaves the old record
+	// (and the old bytes, which are still in the file) in place.
+	record := &Record{ID: id, Offset: offset, Length: int64(len(data))}
+	d.state.Records[id] = record
 	if err := d.saveState(); err != nil {
-		return &Result{nil, err}
+		d.state.Records[id] = old
+		return nil, err
 	}
-	return &Result{record, nil}
+	return record, nil
 }
 
-func (d *Database) endOffset() (int64, error) {
-	return d.file.Seek(0, io.SeekEnd)
+func (d *Database) execute(cmd command) (*Record, error) {
+	cmd.reply = make(chan result, 1)
+	d.commands <- cmd
+	r := <-cmd.reply
+	return r.record, r.err
 }
 
-func (d *Database) Create(input any) *Result {
-	reply := make(chan *Result)
-	d.commands <- command{action: actionInsert, input: input, reply: reply}
-	return <-reply
+// Create stores input under a fresh id and returns its record.
+func (d *Database) Create(input any) (*Record, error) {
+	return d.execute(command{action: actionInsert, input: input})
 }
 
-func (d *Database) Read(id int64, output any) *Result {
-	reply := make(chan *Result)
-	d.commands <- command{action: actionFind, id: id, output: output, reply: reply}
-	return <-reply
+// Read decodes the value stored under id into output, which must be a pointer
+// to a zero value: gob omits zero-valued fields on encoding and leaves them
+// untouched on decoding, so reusing a populated struct keeps stale fields. It
+// returns ErrNotFound for an unknown id.
+func (d *Database) Read(id int64, output any) (*Record, error) {
+	return d.execute(command{action: actionFind, id: id, output: output})
 }
 
-func (d *Database) Delete(id int64) *Result {
-	reply := make(chan *Result)
-	d.commands <- command{action: actionDelete, id: id, reply: reply}
-	return <-reply
+// Delete removes the record with the given id, returning ErrNotFound when
+// there is none.
+func (d *Database) Delete(id int64) error {
+	_, err := d.execute(command{action: actionDelete, id: id})
+	return err
 }
 
-func (d *Database) Update(id int64, input any) *Result {
-	reply := make(chan *Result)
-	d.commands <- command{action: actionUpdate, id: id, input: input, reply: reply}
-	return <-reply
+// Update replaces the value stored under id, returning ErrNotFound when there
+// is none.
+func (d *Database) Update(id int64, input any) (*Record, error) {
+	return d.execute(command{action: actionUpdate, id: id, input: input})
 }
 
-func DatabaseTest() {
-	db := Db("users.db", &Sequence{})
-	// go db.run() BEFORE defer db.Close(): defers run in reverse registration
-	// order, and Close now waits for run.
-	go db.run()
-	defer db.Close()
-
-	user := User{"Jan", "Kowalski", 25, true}
-	result := db.Create(&user)
-	// Without checking the error the next line would dereference a nil Record.
-	if result.Error != nil {
-		log.Println("Create failed:", result.Error)
-		return
-	}
-	fmt.Println(result.Record, result.Error)
-	id := result.Record.Id
-
-	user.IsActive = false
-	result = db.Update(id, &user)
-	fmt.Println(result.Record, result.Error)
-
-	loadedUser := &User{}
-	result = db.Read(id, loadedUser)
-	fmt.Println(result.Record, result.Error, loadedUser)
-
-	result = db.Delete(id)
-	fmt.Println(result.Record, result.Error)
-}
-
+// User is the sample record type used by the demos.
 type User struct {
 	FirstName string
 	LastName  string
@@ -300,108 +321,162 @@ type User struct {
 	IsActive  bool
 }
 
-func DatabaseExercise() {
-	db := Db("users.db", &Sequence{})
-	go db.run()
-
-	// NOTE: router.Run blocks until the process ends, so `defer db.Close()` would
-	// never run - and the database state would never be written. Hence the explicit
-	// close after Run returns, plus a signal handler so that Ctrl-C persists the
-	// state too. Close is idempotent (sync.Once), so both paths firing is fine.
-	defer db.Close()
-
-	stop := make(chan os.Signal, 1)
-	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
-	go func() {
-		<-stop
-		db.Close()
-		os.Exit(0)
+// DatabaseTest runs one create/update/read/delete cycle against users.db.
+func DatabaseTest() {
+	db, err := Open("users.db", &Sequence{})
+	if err != nil {
+		log.Println(err)
+		return
+	}
+	defer func() {
+		if err := db.Close(); err != nil {
+			log.Println("close failed:", err)
+		}
 	}()
 
+	user := User{"Jan", "Kowalski", 25, true}
+	record, err := db.Create(&user)
+	// Without checking the error the next line would dereference a nil Record.
+	if err != nil {
+		log.Println("Create failed:", err)
+		return
+	}
+	fmt.Println(record)
+	id := record.ID
+
+	user.IsActive = false
+	record, err = db.Update(id, &user)
+	fmt.Println(record, err)
+
+	loadedUser := &User{}
+	record, err = db.Read(id, loadedUser)
+	fmt.Println(record, err, loadedUser)
+
+	fmt.Println(db.Delete(id))
+}
+
+// DatabaseExercise serves users.db over HTTP on :8080 until SIGINT/SIGTERM,
+// then shuts the server down gracefully and persists the index.
+func DatabaseExercise() {
+	db, err := Open("users.db", &Sequence{})
+	if err != nil {
+		log.Println(err)
+		return
+	}
+	defer func() {
+		if err := db.Close(); err != nil {
+			log.Println("close failed:", err)
+		}
+	}()
+
+	h := &userHandler{db: db}
 	router := gin.Default()
-	router.Use(func(c *gin.Context) {
-		c.Set("db", db)
-	})
+	router.POST("/users", h.createUser)
+	router.GET("/users/:id", h.getUser)
+	router.PUT("/users/:id", h.updateUser)
+	router.DELETE("/users/:id", h.deleteUser)
 
-	router.POST("/users", createUser)
-	router.GET("/users/:id", getUser)
-	router.PUT("/users/:id", updateUser)
-	router.DELETE("/users/:id", deleteUser)
+	server := &http.Server{Addr: ":8080", Handler: router}
 
-	if err := router.Run(":8080"); err != nil {
-		log.Println("server stopped:", err)
+	// signal.NotifyContext cancels ctx on the first signal; the second signal
+	// (after stop() restores the default handler) kills the process outright.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	go func() {
+		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Println("server stopped:", err)
+			stop()
+		}
+	}()
+
+	<-ctx.Done()
+	stop()
+
+	// Shutdown stops accepting new connections and waits for in-flight
+	// requests, so no database command is lost; the deferred Close then
+	// persists the index. os.Exit here would skip all of that.
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		log.Println("shutdown failed:", err)
 	}
 }
 
-func getDb(c *gin.Context) *Database {
-	db, _ := c.Get("db")
-	return db.(*Database)
+// userHandler groups the HTTP handlers around the database they use.
+type userHandler struct {
+	db *Database
 }
 
+// CreateUserResponse is the body of a successful POST /users.
 type CreateUserResponse struct {
-	Id int64
+	ID int64
 }
 
-func createUser(c *gin.Context) {
+// respondError maps a database error to an HTTP status.
+func respondError(c *gin.Context, err error) {
+	if errors.Is(err, ErrNotFound) {
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+}
+
+func (h *userHandler) createUser(c *gin.Context) {
 	var user User
-	err := c.Bind(&user)
+	if err := c.ShouldBindJSON(&user); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	record, err := h.db.Create(&user)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{})
+		respondError(c, err)
 		return
 	}
-	result := getDb(c).Create(&user)
-	if result.Error != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{})
-		return
-	}
-	c.Header("Location", fmt.Sprintf("/api/users/%d", result.Record.Id))
-	c.JSON(http.StatusCreated, &CreateUserResponse{result.Record.Id})
+	c.Header("Location", fmt.Sprintf("/users/%d", record.ID))
+	c.JSON(http.StatusCreated, CreateUserResponse{ID: record.ID})
 }
 
-func getUser(c *gin.Context) {
+func (h *userHandler) getUser(c *gin.Context) {
 	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{})
-		return
-	}
-	user := User{}
-	result := getDb(c).Read(id, &user)
-	if result.Error != nil {
-		c.JSON(http.StatusNotFound, gin.H{})
-		return
-	}
-	c.JSON(http.StatusOK, &user)
-}
-
-func updateUser(c *gin.Context) {
-	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
 		return
 	}
 	var user User
-	err = c.Bind(&user)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{})
+	if _, err := h.db.Read(id, &user); err != nil {
+		respondError(c, err)
 		return
 	}
-	result := getDb(c).Update(id, &user)
-	if result.Error != nil {
-		c.JSON(http.StatusNotFound, gin.H{})
+	c.JSON(http.StatusOK, user)
+}
+
+func (h *userHandler) updateUser(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+		return
+	}
+	var user User
+	if err := c.ShouldBindJSON(&user); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if _, err := h.db.Update(id, &user); err != nil {
+		respondError(c, err)
 		return
 	}
 	c.Status(http.StatusNoContent)
 }
 
-func deleteUser(c *gin.Context) {
+func (h *userHandler) deleteUser(c *gin.Context) {
 	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
 		return
 	}
-	result := getDb(c).Delete(id)
-	if result.Error != nil {
-		c.JSON(http.StatusNotFound, gin.H{})
+	if err := h.db.Delete(id); err != nil {
+		respondError(c, err)
 		return
 	}
 	c.Status(http.StatusNoContent)

@@ -6,8 +6,9 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-	"training.pl/go/examples/chat/common"
 	"unicode/utf8"
+
+	"training.pl/go/examples/chat/common"
 )
 
 var (
@@ -58,12 +59,11 @@ func ValidateRoomName(roomName string) error {
 
 // ValidateMessage validates a message content
 func ValidateMessage(content string) error {
-	if len(content) == 0 {
+	if content == "" {
 		return errors.New("message cannot be empty")
 	}
 	// MaxMessageSize is a limit in BYTES (it protects the read buffer), so the
-	// message says bytes too - otherwise it would mislead for text
-	// spoza ASCII.
+	// message says bytes too - otherwise it would mislead for non-ASCII text.
 	if len(content) > common.MaxMessageSize {
 		return fmt.Errorf("message cannot exceed %d bytes", common.MaxMessageSize)
 	}
@@ -72,7 +72,7 @@ func ValidateMessage(content string) error {
 
 // ValidateFileName validates a file name for security
 func ValidateFileName(filename string) error {
-	if len(filename) == 0 {
+	if filename == "" {
 		return errors.New("filename cannot be empty")
 	}
 	if len(filename) > common.MaxFileNameLength {

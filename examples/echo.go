@@ -6,10 +6,8 @@ import (
 	"strings"
 )
 
+// Echo prints the program arguments separated by single spaces, followed by a
+// newline - like echo(1), it prints a bare newline when there are no arguments.
 func Echo() {
-	args := os.Args[1:]
-	if len(args) > 0 {
-		echo := strings.Join(args, " ")
-		fmt.Println(echo)
-	}
+	fmt.Println(strings.Join(os.Args[1:], " "))
 }

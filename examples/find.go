@@ -10,20 +10,25 @@ import (
 	"strings"
 )
 
+// Find walks the tree under -p (default ".") and prints every entry of type -t
+// (file, dir or symlink) whose name contains -n. Only -t is required: an empty
+// -n matches every name.
 func Find() {
-	path := flag.String("p", ".", "Start path")
-	name := flag.String("n", "", "Name to match")
-	fileType := flag.String("t", "", "Type to match (file, dir, symlink)")
-
-	flag.Parse()
-
-	if *name == "" || *fileType == "" {
-		flag.Usage()
-		return
+	// A private FlagSet instead of flag.CommandLine - see Cat.
+	flags := flag.NewFlagSet("find", flag.ExitOnError)
+	path := flags.String("p", ".", "Start path")
+	name := flags.String("n", "", "Substring of the name to match (empty matches everything)")
+	fileType := flags.String("t", "", "Type to match (file, dir, symlink)")
+	if err := flags.Parse(os.Args[1:]); err != nil {
+		os.Exit(2)
 	}
 
 	switch *fileType {
 	case "file", "dir", "symlink":
+	case "":
+		fmt.Fprintln(os.Stderr, "find: -t is required")
+		flags.Usage()
+		os.Exit(2)
 	default:
 		log.Fatalf("unknown type %q, allowed: file, dir, symlink", *fileType)
 	}
@@ -45,6 +50,8 @@ func onElement(fileType, name string) fs.WalkDirFunc {
 			log.Printf("skipping %q: %v", path, err)
 			return nil
 		}
+		// strings.Contains with an empty substring is always true, so an empty
+		// -n matches everything.
 		if !strings.Contains(entry.Name(), name) {
 			return nil
 		}

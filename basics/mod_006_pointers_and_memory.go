@@ -327,7 +327,8 @@ func m006Describe(p *int) string {
 - **You can see the decisions**: `go build -gcflags='-m'` prints them, and `-m -m` explains why.
   This is the single most useful optimisation tool in Go, and it needs no profiler.
 - **Goroutine stacks start small (2 KB) and grow** by copying to a bigger stack, up to 1 GB by
-  default. That is why deep recursion usually works, and why passing large structs by value is not
+  default on 64-bit platforms (250 MB on 32-bit). That is why deep recursion usually works, and why
+  passing large structs by value is not
   the disaster it would be with a fixed 1 MB stack.
 - Because stacks move, **a pointer's numeric address is not stable**. Never store one as an integer
   and expect it to remain valid; that is exactly what `uintptr` cannot promise.
@@ -383,7 +384,7 @@ func m006EscapeAnalysis() {
 	fmt.Println("  reducing the allocation COUNT is what matters; measure with -benchmem")
 
 	// Stack and GC facts.
-	fmt.Printf("goroutine stacks start at 2 KB and grow to a %d-byte limit by default\n",
+	fmt.Printf("goroutine stacks start at 2 KB and grow to a %d-byte limit by default on 64-bit platforms\n",
 		int64(1)<<30)
 	fmt.Printf("GOMAXPROCS=%d  NumGoroutine=%d  NumCPU=%d\n",
 		runtime.GOMAXPROCS(0), runtime.NumGoroutine(), runtime.NumCPU())
@@ -443,7 +444,7 @@ func m006AliasingHazards() {
 	fmt.Printf("1. a 10-byte slice of a 1 MB array: len=%d cap=%d <- the whole megabyte stays alive\n",
 		len(leaky), cap(leaky))
 	safe := append([]byte(nil), huge[:10]...)
-	fmt.Printf("   after copying: len=%d cap=%d <- the megabyte can now be collected\n",
+	fmt.Printf("   after copying: len=%d cap=%d <- the copy no longer retains the megabyte\n",
 		len(safe), cap(safe))
 
 	// 2. Overlapping slices.

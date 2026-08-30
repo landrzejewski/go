@@ -250,6 +250,8 @@ func m010Contains[T comparable](s []T, v T) bool {
 - Many of the obvious ones are **already in the standard library** and you should not write them:
   `slices.Contains`, `slices.Index`, `slices.Sort`, `slices.SortFunc`, `slices.Max`, `slices.Min`,
   `slices.Reverse`, `maps.Keys`, `maps.Values`, `min`, `max`, `clear`. Reach for those first.
+  Note that `maps.Keys`/`maps.Values` return an `iter.Seq`, not a slice — wrap them in
+  `slices.Sorted` or `slices.Collect` when you need a slice.
 - There is deliberately **no `Map`/`Filter`/`Reduce`** in the standard library. The Go team's
   position is that a `for` loop is clearer than a chain of higher-order calls, and that the iterator
   package (module 012) covers the composable cases.
@@ -487,6 +489,7 @@ func m010New[T any](opts ...m010Option[T]) *T {
 }
 
 // A context key that carries its value's type, so retrieval cannot assert the wrong one.
+// T is intentionally unused inside the struct: it exists only to tie the key to its value type.
 type m010CtxKey[T any] struct{ name string }
 
 var (
@@ -724,15 +727,18 @@ func m010FilterSeq[T any](seq iter.Seq[T], keep func(T) bool) iter.Seq[T] {
 
 func m010TakeSeq[T any](seq iter.Seq[T], n int) iter.Seq[T] {
 	return func(yield func(T) bool) {
+		if n <= 0 {
+			return
+		}
 		taken := 0
 		for v := range seq {
-			if taken >= n {
-				return
-			}
 			if !yield(v) {
 				return
 			}
 			taken++
+			if taken >= n {
+				return // stop before pulling element n+1 from the source
+			}
 		}
 	}
 }
@@ -951,8 +957,9 @@ func m010StdlibGenerics() {
 Go uses **GC-shape stenciling with dictionaries**. It does not monomorphise every instantiation as
 C++ does, nor box everything as Java does. Types sharing a *GC shape* — broadly, the same size and
 pointer layout — share one compiled copy, and a hidden **dictionary** argument carries the
-type-specific details. So all pointer-shaped instantiations (`*T`, `[]T`, `map[K]V`, interfaces)
-share a single stencil, while `int`, `float64` and `struct{a,b int}` each get their own.
+type-specific details. So all single-pointer-shaped instantiations (`*T`, `map[K]V`, `chan T`,
+`func` values) share one stencil, while a slice (three words) and an interface (two words) each
+get their own shape, as do `int`, `float64` and `struct{a,b int}`.
 
 The consequences are worth knowing:
 
@@ -994,8 +1001,8 @@ func m010CostAndLimits() {
 	fmt.Println("\n--- Section 10: Cost, Limits and When Not to Use Generics ---")
 
 	fmt.Println("  compiled with GC-shape stenciling plus dictionaries:")
-	fmt.Println("    all pointer-shaped instantiations share ONE compiled copy")
-	fmt.Println("    int, float64 and each struct shape get their own")
+	fmt.Println("    all single-pointer-shaped instantiations (*T, map, chan, func) share ONE copy")
+	fmt.Println("    slices, interfaces, int, float64 and each struct shape get their own")
 	fmt.Println("    so: smaller binaries than C++, faster than boxing into any")
 
 	// The three ways to write the same thing, so the trade-off is concrete.

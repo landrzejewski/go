@@ -1,3 +1,9 @@
+// This file is a walkthrough of the classic synchronisation primitives -
+// goroutines, WaitGroup, Mutex, RWMutex, Cond, deadlocks, atomics, the Barrier
+// and the Semaphore. Every snippet is deliberately commented out (they all
+// define a Run function and could not coexist), so nothing here is compiled:
+// uncomment one block at a time, add the imports it needs, and run it.
+
 package concurrency
 
 /*func Run() {
@@ -261,9 +267,10 @@ func Run() {
 // Semaphore
 func Run() {
 	semaphore := NewSemaphore(5)
-	// NOTE: since Go 1.22 the loop variable is scoped to one iteration, so
-	// capturing `i` in the goroutine below is CORRECT - each gets its own
-	// value. In earlier versions they would all have seen 100 and you had to
+	// NOTE: since Go 1.22 each iteration has its own `i`, so capturing it in
+	// the goroutine below is CORRECT. Before Go 1.22 all closures shared one
+	// loop variable and printed whatever value it happened to have when they
+	// ran (typically 100, after the loop had finished) - the fix then was to
 	// pass i as a function argument.
 	for i := 0; i < 100; i++ {
 		go func() {

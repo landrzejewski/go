@@ -14,23 +14,55 @@ import (
 type UI struct {
 	conn         *Connection
 	fileTransfer *FileTransfer
-	rooms        map[string]string // roomID -> roomName
-	users        []string
-	running      bool
-	mutex        sync.RWMutex
+	// quit is the shared shutdown routine (set by main): /quit and Ctrl-C must
+	// do exactly the same thing.
+	quit  func()
+	rooms map[string]string // roomID -> roomName
+	users []string
+	mutex sync.RWMutex
 }
 
 // NewUI creates a new UI instance
-func NewUI(conn *Connection, ft *FileTransfer) *UI {
+func NewUI(conn *Connection, ft *FileTransfer, quit func()) *UI {
 	return &UI{
 		conn:         conn,
 		fileTransfer: ft,
+		quit:         quit,
 		rooms:        make(map[string]string),
-		running:      true,
 	}
 }
 
-// Start starts the UI
+// command describes one slash command for the help text.
+type command struct {
+	usage string
+	help  string
+}
+
+// commands is the single table behind /help. Every entry must have a matching
+// case in handleCommand / handleRoomCommand, so the help text cannot drift from
+// what the client actually implements.
+var commands = []command{
+	{"/help", "Show help"},
+	{"/users", "List online users"},
+	{"/msg <nick> <message>", "Send private message"},
+	{"/file <nick> <filepath>", "Send file"},
+	{"/status <active|busy|invisible>", "Change status"},
+	{"/room create <name>", "Create private room"},
+	{"/room invite <id> <nick>", "Invite to room"},
+	{"/room accept <id>", "Accept room invitation"},
+	{"/room decline <id>", "Decline room invitation"},
+	{"/room msg <id> <message>", "Message to room"},
+	{"/room list", "List your rooms"},
+	{"/room leave <id>", "Leave a room"},
+	{"/room members <id>", "List room members"},
+	{"/room kick <id> <nick>", "Kick a member (creator only)"},
+	{"/room delete <id>", "Delete a room (creator only)"},
+	{"/room topic <id> <text>", "Set the room topic"},
+	{"/transfers", "Show file transfers"},
+	{"/quit", "Exit"},
+}
+
+// Start starts the UI. It returns when standard input is closed.
 func (ui *UI) Start() {
 	// Clear screen and show welcome
 	clearScreen()
@@ -50,22 +82,11 @@ func (ui *UI) showWelcome() {
 	fmt.Println("=================================")
 	fmt.Println("   TCP Chat Client")
 	fmt.Println("=================================")
-	fmt.Printf("Connected as: %s\n", ui.conn.nickname)
+	fmt.Printf("Connected as: %s\n", ui.conn.Nickname())
 	fmt.Println("\nCommands:")
-	fmt.Println("  /help                    - Show help")
-	fmt.Println("  /users                   - List online users")
-	fmt.Println("  /msg <nick> <message>    - Send private message")
-	fmt.Println("  /file <nick> <filepath>  - Send file")
-	fmt.Println("  /status <active|busy|invisible> - Change status")
-	fmt.Println("  /room create <name>      - Create private room")
-	fmt.Println("  /room invite <id> <nick> - Invite to room")
-	fmt.Println("  /room accept <id>        - Accept room invitation")
-	fmt.Println("  /room decline <id>       - Decline room invitation")
-	fmt.Println("  /room msg <id> <message> - Message to room")
-	fmt.Println("  /room list               - List your rooms")
-	fmt.Println("  /room leave <id>         - Leave a room")
-	fmt.Println("  /transfers               - Show file transfers")
-	fmt.Println("  /quit                    - Exit")
+	for _, c := range commands {
+		fmt.Printf("  %-33s - %s\n", c.usage, c.help)
+	}
 	fmt.Println("\nType messages without '/' to broadcast to all users")
 	fmt.Printf("=================================\n\n")
 }
@@ -74,7 +95,7 @@ func (ui *UI) showWelcome() {
 func (ui *UI) handleInput() {
 	scanner := bufio.NewScanner(os.Stdin)
 
-	for scanner.Scan() && ui.running {
+	for scanner.Scan() {
 		input := strings.TrimSpace(scanner.Text())
 		if input == "" {
 			continue
@@ -84,8 +105,17 @@ func (ui *UI) handleInput() {
 			ui.handleCommand(input)
 		} else {
 			// Send broadcast message
-			ui.conn.SendBroadcastMessage(input)
+			ui.report(ui.conn.SendBroadcastMessage(input))
 		}
+	}
+}
+
+// report prints a send error, if any. Every Send* call can fail with
+// ErrNotConnected once the connection is gone; silently ignoring that left the
+// user typing into the void.
+func (ui *UI) report(err error) {
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
 	}
 }
 
@@ -112,7 +142,7 @@ func (ui *UI) handleCommand(input string) {
 		}
 		recipient := parts[1]
 		message := strings.Join(parts[2:], " ")
-		ui.conn.SendTextMessage(recipient, message)
+		ui.report(ui.conn.SendTextMessage(recipient, message))
 
 	case "/file":
 		if len(parts) < 3 {
@@ -147,7 +177,10 @@ func (ui *UI) handleCommand(input string) {
 			return
 		}
 
-		ui.conn.ChangeStatus(status)
+		if err := ui.conn.ChangeStatus(status); err != nil {
+			ui.report(err)
+			return
+		}
 		fmt.Printf("Status changed to: %s\n", status)
 
 	case "/room":
@@ -157,10 +190,7 @@ func (ui *UI) handleCommand(input string) {
 		ui.showTransfers()
 
 	case "/quit":
-		ui.running = false
-		ui.conn.Disconnect()
-		fmt.Println("Goodbye!")
-		os.Exit(0)
+		ui.quit()
 
 	default:
 		fmt.Printf("Unknown command: %s\n", command)
@@ -183,7 +213,7 @@ func (ui *UI) handleRoomCommand(args []string) {
 			return
 		}
 		roomName := strings.Join(args[1:], " ")
-		ui.conn.CreateRoom(roomName)
+		ui.report(ui.conn.CreateRoom(roomName))
 
 	case "invite":
 		if len(args) < 3 {
@@ -192,7 +222,7 @@ func (ui *UI) handleRoomCommand(args []string) {
 		}
 		roomID := args[1]
 		nickname := args[2]
-		ui.conn.InviteToRoom(roomID, nickname)
+		ui.report(ui.conn.InviteToRoom(roomID, nickname))
 
 	case "accept":
 		if len(args) < 2 {
@@ -200,7 +230,10 @@ func (ui *UI) handleRoomCommand(args []string) {
 			return
 		}
 		roomID := args[1]
-		ui.conn.RespondToInvite(roomID, true)
+		if err := ui.conn.RespondToInvite(roomID, true); err != nil {
+			ui.report(err)
+			return
+		}
 		fmt.Printf("Accepted invitation to room %s\n", roomID)
 
 	case "decline":
@@ -209,7 +242,10 @@ func (ui *UI) handleRoomCommand(args []string) {
 			return
 		}
 		roomID := args[1]
-		ui.conn.RespondToInvite(roomID, false)
+		if err := ui.conn.RespondToInvite(roomID, false); err != nil {
+			ui.report(err)
+			return
+		}
 		fmt.Printf("Declined invitation to room %s\n", roomID)
 
 	case "msg":
@@ -219,7 +255,7 @@ func (ui *UI) handleRoomCommand(args []string) {
 		}
 		roomID := args[1]
 		message := strings.Join(args[2:], " ")
-		ui.conn.SendRoomMessage(roomID, message)
+		ui.report(ui.conn.SendRoomMessage(roomID, message))
 
 	case "list":
 		ui.showRooms()
@@ -230,8 +266,8 @@ func (ui *UI) handleRoomCommand(args []string) {
 			return
 		}
 		roomID := args[1]
-		ui.conn.LeaveRoom(roomID)
-		// Don't delete here - wait for server confirmation
+		// Don't delete locally here - wait for server confirmation
+		ui.report(ui.conn.LeaveRoom(roomID))
 
 	case "members":
 		if len(args) < 2 {
@@ -239,7 +275,7 @@ func (ui *UI) handleRoomCommand(args []string) {
 			return
 		}
 		roomID := args[1]
-		ui.conn.GetRoomMembers(roomID)
+		ui.report(ui.conn.RoomMembers(roomID))
 
 	case "kick":
 		if len(args) < 3 {
@@ -248,7 +284,7 @@ func (ui *UI) handleRoomCommand(args []string) {
 		}
 		roomID := args[1]
 		nickname := args[2]
-		ui.conn.KickFromRoom(roomID, nickname)
+		ui.report(ui.conn.KickFromRoom(roomID, nickname))
 
 	case "delete":
 		if len(args) < 2 {
@@ -256,7 +292,7 @@ func (ui *UI) handleRoomCommand(args []string) {
 			return
 		}
 		roomID := args[1]
-		ui.conn.DeleteRoom(roomID)
+		ui.report(ui.conn.DeleteRoom(roomID))
 
 	case "topic":
 		if len(args) < 3 {
@@ -265,7 +301,7 @@ func (ui *UI) handleRoomCommand(args []string) {
 		}
 		roomID := args[1]
 		description := strings.Join(args[2:], " ")
-		ui.conn.SetRoomTopic(roomID, description)
+		ui.report(ui.conn.SetRoomTopic(roomID, description))
 
 	default:
 		fmt.Printf("Unknown room command: %s\n", subcommand)
@@ -274,7 +310,7 @@ func (ui *UI) handleRoomCommand(args []string) {
 
 // receiveMessages handles incoming messages
 func (ui *UI) receiveMessages() {
-	for msg := range ui.conn.GetMessages() {
+	for msg := range ui.conn.Messages() {
 		ui.handleMessage(msg)
 	}
 }
@@ -282,6 +318,7 @@ func (ui *UI) receiveMessages() {
 // handleMessage processes incoming messages
 func (ui *UI) handleMessage(msg *common.Message) {
 	timestamp := msg.Timestamp.Format("15:04:05")
+	me := ui.conn.Nickname()
 
 	switch msg.Type {
 	case common.TypeText:
@@ -299,10 +336,10 @@ func (ui *UI) handleMessage(msg *common.Message) {
 			// below: our own broadcast comes back with Sender == our nickname, so
 			// with the other order it was reported as "[Private -> *]".
 			fmt.Printf("[%s] %s: %s\n", timestamp, msg.Sender, msg.Content)
-		} else if msg.Recipient == ui.conn.nickname {
+		} else if msg.Recipient == me {
 			// Private message addressed to us.
 			fmt.Printf("[%s] [Private] %s: %s\n", timestamp, msg.Sender, msg.Content)
-		} else if msg.Sender == ui.conn.nickname {
+		} else if msg.Sender == me {
 			// A copy of our own private message, which the server deliberately
 			// echoes back to the sender. Without this branch Recipient pointed at
 			// the other person, so no condition matched and "/msg bob hi" printed
@@ -321,7 +358,8 @@ func (ui *UI) handleMessage(msg *common.Message) {
 		fmt.Printf("[%s] %s changed status to %s\n", timestamp, msg.Sender, msg.Status)
 
 	case common.TypeRoom:
-		if msg.Action == common.RoomCreate {
+		switch msg.Action {
+		case common.RoomCreate:
 			// msg.RoomName carries JUST the room name. We used to store msg.Content
 			// here - the server's whole sentence ("Room 'x' created successfully") -
 			// so "/room list" printed nonsense and, contrary to its own comment, the
@@ -330,23 +368,23 @@ func (ui *UI) handleMessage(msg *common.Message) {
 			ui.rooms[msg.Room] = msg.RoomName
 			ui.mutex.Unlock()
 			fmt.Printf("[%s] %s (ID: %s)\n", timestamp, msg.Content, msg.Room)
-		} else if msg.Action == common.RoomJoin {
+		case common.RoomJoin:
 			// Add room to our list when we join
 			ui.mutex.Lock()
 			ui.rooms[msg.Room] = msg.RoomName
 			ui.mutex.Unlock()
 			fmt.Printf("[%s] Joined room '%s' (ID: %s)\n", timestamp, msg.RoomName, msg.Room)
-		} else if msg.Action == common.RoomMembers {
+		case common.RoomMembers:
 			// Display room members
 			fmt.Printf("[%s] %s\n", timestamp, msg.Content)
-		} else if msg.Action == common.RoomLeaveConfirm {
+		case common.RoomLeaveConfirm:
 			// Remove room from local state after confirmation
 			ui.mutex.Lock()
 			delete(ui.rooms, msg.Room)
 			ui.mutex.Unlock()
 			// Content carries the full message (leave / kick / room deleted),
-			// RoomName just the name - print the message, because only it tells
-			// te trzy sytuacje.
+			// RoomName just the name - print the message, because only it
+			// distinguishes the three cases.
 			fmt.Printf("[%s] %s\n", timestamp, msg.Content)
 		}
 
@@ -355,6 +393,11 @@ func (ui *UI) handleMessage(msg *common.Message) {
 		fmt.Printf("Type '/room accept %s' to accept or '/room decline %s' to decline\n", msg.Room, msg.Room)
 
 	case common.TypeFile:
+		if msg.Sender == me && msg.RefID != "" {
+			// The server accepted our upload and assigned its ID - start streaming.
+			ui.fileTransfer.startOutgoing(msg.RefID, msg.FileID)
+			return
+		}
 		fmt.Printf("[%s] %s is sending you file: %s (%s)\n",
 			timestamp, msg.Sender, msg.Filename, formatFileSize(msg.Filesize))
 
@@ -371,13 +414,17 @@ func (ui *UI) handleMessage(msg *common.Message) {
 			return
 		}
 		fmt.Printf("\n[%s] File received: %s\n", timestamp, msg.Filename)
-		if err := ui.fileTransfer.ReceiveFile(msg.FileID); err != nil {
+		if path, err := ui.fileTransfer.ReceiveFile(msg.FileID); err != nil {
 			fmt.Printf("Error saving file: %v\n", err)
 		} else {
-			fmt.Printf("File saved to downloads/%s\n", msg.Filename)
+			fmt.Printf("File saved to %s\n", path)
 		}
 
 	case common.TypeError:
+		if msg.RefID != "" {
+			// The server rejected one of our uploads - drop the pending record.
+			ui.fileTransfer.abortPending(msg.RefID)
+		}
 		fmt.Printf("[%s] Error: %s\n", timestamp, msg.Error)
 
 	default:
@@ -390,8 +437,12 @@ func (ui *UI) handleMessage(msg *common.Message) {
 
 // showUsers displays online users
 func (ui *UI) showUsers() {
+	ui.mutex.RLock()
+	users := append([]string(nil), ui.users...)
+	ui.mutex.RUnlock()
+
 	fmt.Println("\n=== Online Users ===")
-	for _, user := range ui.users {
+	for _, user := range users {
 		parts := strings.Split(user, ":")
 		if len(parts) == 2 {
 			fmt.Printf("  %s (%s)\n", parts[0], parts[1])
@@ -419,7 +470,7 @@ func (ui *UI) showRooms() {
 
 // showTransfers displays active file transfers
 func (ui *UI) showTransfers() {
-	transfers := ui.fileTransfer.GetTransferProgress()
+	transfers := ui.fileTransfer.TransferProgress()
 
 	fmt.Println("\n=== File Transfers ===")
 	if len(transfers) == 0 {

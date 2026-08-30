@@ -1,8 +1,10 @@
 package basics
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
+	"iter"
 	"slices"
 	"strings"
 )
@@ -108,8 +110,10 @@ func m005TryAppend(s []int) { s = append(s, 4); _ = s }
   Go handle errors as ordinary values rather than exceptions, and it is used everywhere.
 - The dominant convention is `(result, error)` with the error **last**. A close second is the
   **comma-ok** form `(value, bool)` used by map reads, type assertions and channel receives.
-- Every returned value must be **consumed or discarded**. `v, _ := f()` explicitly throws one away;
-  silently ignoring one is a compile error (`assignment mismatch`).
+- An assignment must match the result count exactly: `v, _ := f()` explicitly throws one away,
+  and `v := f()` for a two-result `f` is a compile error (`assignment mismatch`). Only a call used
+  as a bare statement, `f()`, may ignore every result — which is why `go vet` and linters flag
+  unchecked errors.
 - **Named results** — `func f() (sum int, err error)` — declare the results as variables,
   initialised to their zero values at entry. Their two real uses are:
     1. letting a **deferred closure inspect or modify** what is about to be returned. This is the
@@ -170,7 +174,7 @@ func m005MultipleReturns() {
 		fmt.Printf("m005Divide(1, 0) -> %v\n", err)
 	}
 
-	// Every result must be consumed or explicitly discarded.
+	// An assignment must match the result count; discard explicitly with `_`.
 	//	q := m005Divide(10, 4) // ERROR: assignment mismatch: 1 variable but m005Divide returns 2 values
 	q, _ := m005Divide(10, 4)
 	fmt.Printf("discarding the error with _: %v\n", q)
@@ -354,7 +358,7 @@ func m005FunctionsAsValues() {
 	// --- Higher-order functions ---
 	numbers := []int{5, 2, 8, 1}
 	sorted := slices.Clone(numbers)
-	slices.SortFunc(sorted, func(a, b int) int { return b - a }) // descending
+	slices.SortFunc(sorted, func(a, b int) int { return cmp.Compare(b, a) }) // descending
 	fmt.Printf("slices.SortFunc descending: %v\n", sorted)
 	idx := slices.IndexFunc(numbers, func(n int) bool { return n > 4 })
 	fmt.Printf("slices.IndexFunc(n > 4) = %d\n", idx)
@@ -372,7 +376,7 @@ func m005ForEach(values []int, task func(index, value int)) {
 }
 
 // m005MapKeys is a tiny local helper; module 012 uses maps.Keys from the standard library instead.
-func m005MapKeys[K comparable, V any](m map[K]V) func(func(K) bool) {
+func m005MapKeys[K comparable, V any](m map[K]V) iter.Seq[K] {
 	return func(yield func(K) bool) {
 		for k := range m {
 			if !yield(k) {
@@ -582,7 +586,13 @@ func m005SafeDivide(a, b int) (msg string) {
 
 // m005CatchPanic runs f and returns whatever it panicked with.
 func m005CatchPanic(f func()) (recovered any) {
-	defer func() { recovered = recover() }()
+	// Only overwrite the named result when there really was a panic: an unconditional
+	// `recovered = recover()` would run on the normal path too and replace "did not panic" with nil.
+	defer func() {
+		if r := recover(); r != nil {
+			recovered = r
+		}
+	}()
 	f()
 	return "did not panic"
 }

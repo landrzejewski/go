@@ -240,7 +240,7 @@ func m017CustomFlagsAndSubcommands() {
 	fmt.Printf("  rejected at parse time: %v\n", err)
 
 	// --- flag.Func, for a one-off parse with no new type ---
-	var pairs = map[string]string{}
+	pairs := map[string]string{}
 	fn := flag.NewFlagSet("fn", flag.ContinueOnError)
 	fn.SetOutput(io.Discard)
 	fn.Func("set", "key=value (repeatable)", func(v string) error {

@@ -4,44 +4,56 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"strings"
 )
 
 const (
-	empty    = "-"
-	playerX  = "X"
-	playerO  = "O"
-	maxIndex = 2
+	empty     = "-"
+	playerX   = "X"
+	playerO   = "O"
+	boardSize = 3
+	maxIndex  = boardSize - 1
 )
 
-var board = [][]string{
-	{empty, empty, empty},
-	{empty, empty, empty},
-	{empty, empty, empty},
+// game holds the whole state of one tic-tac-toe match. Keeping it in a struct
+// rather than in package-level variables means TicTacToe can be called more
+// than once in a process and each match starts from an empty board.
+type game struct {
+	board         [boardSize][boardSize]string
+	currentPlayer string
+	movesCount    int
 }
 
-var currentPlayer = playerX
-var movesCount = 0
+func newGame() *game {
+	g := &game{currentPlayer: playerX}
+	for row := range g.board {
+		for col := range g.board[row] {
+			g.board[row][col] = empty
+		}
+	}
+	return g
+}
 
-func printBoard() {
-	for _, row := range board {
-		fmt.Println(row)
+func (g *game) printBoard() {
+	for _, row := range g.board {
+		fmt.Println(strings.Join(row[:], " "))
 	}
 }
 
-func makeMove(row, col int) bool {
-	if isFieldOutsideBoard(row, col) || isFieldTaken(row, col) {
+func (g *game) makeMove(row, col int) bool {
+	if isFieldOutsideBoard(row, col) || g.isFieldTaken(row, col) {
 		return false
 	}
-	board[row][col] = currentPlayer
-	movesCount++
+	g.board[row][col] = g.currentPlayer
+	g.movesCount++
 	return true
 }
 
-func changePlayer() {
-	if currentPlayer == playerX {
-		currentPlayer = playerO
+func (g *game) changePlayer() {
+	if g.currentPlayer == playerX {
+		g.currentPlayer = playerO
 	} else {
-		currentPlayer = playerX
+		g.currentPlayer = playerX
 	}
 }
 
@@ -54,73 +66,75 @@ func isFieldOutsideBoard(row, col int) bool {
 	return row < 0 || row > maxIndex || col < 0 || col > maxIndex
 }
 
-func isFieldTaken(row, col int) bool {
-	return board[row][col] != empty
+func (g *game) isFieldTaken(row, col int) bool {
+	return g.board[row][col] != empty
 }
 
-// Return the symbol that ACTUALLY formed the winning line, not currentPlayer.
-// The previous version was correct only under the invisible assumption
-// "checkWinner is called exactly once, right after a move, before changePlayer"
-// - and broke under any other use (for instance checking a board loaded from
-// somewhere else).
-func checkWinner() string {
+// winner returns the symbol that ACTUALLY formed a winning line, or empty when
+// there is none. It deliberately does not rely on currentPlayer, so it is
+// correct no matter when it is called.
+func (g *game) winner() string {
+	b := &g.board
 	for i := 0; i <= maxIndex; i++ {
-		if board[i][0] != empty && board[i][0] == board[i][1] && board[i][1] == board[i][2] {
-			return board[i][0]
+		if b[i][0] != empty && b[i][0] == b[i][1] && b[i][1] == b[i][2] {
+			return b[i][0]
 		}
-		if board[0][i] != empty && board[0][i] == board[1][i] && board[1][i] == board[2][i] {
-			return board[0][i]
+		if b[0][i] != empty && b[0][i] == b[1][i] && b[1][i] == b[2][i] {
+			return b[0][i]
 		}
 	}
 
-	if board[0][0] != empty && board[0][0] == board[1][1] && board[1][1] == board[2][2] {
-		return board[0][0]
+	if b[0][0] != empty && b[0][0] == b[1][1] && b[1][1] == b[2][2] {
+		return b[0][0]
 	}
-	if board[0][2] != empty && board[0][2] == board[1][1] && board[1][1] == board[2][0] {
-		return board[0][2]
+	if b[0][2] != empty && b[0][2] == b[1][1] && b[1][1] == b[2][0] {
+		return b[0][2]
 	}
 
 	return empty
 }
 
-func isBoardFull() bool {
-	return movesCount >= 9
+func (g *game) isBoardFull() bool {
+	return g.movesCount >= boardSize*boardSize
 }
 
+// TicTacToe plays one game of tic-tac-toe on the terminal. Players take turns
+// typing "column row" (zero-based) until somebody completes a row, column or
+// diagonal, or the board is full.
 func TicTacToe() {
+	g := newGame()
+
 	// Read the WHOLE line and only then parse numbers out of it. fmt.Scanln
 	// on a parse error does not consume the offending token, so typing "abc" made
 	// the next call trip over the same bytes and the program printed
 	// "Invalid move. Try again" forever.
 	input := bufio.NewScanner(os.Stdin)
-	printBoard()
+	g.printBoard()
 	for {
-		fmt.Printf("Player %s, enter move (column, row): ", currentPlayer)
+		fmt.Printf("Player %s, enter move (column, row): ", g.currentPlayer)
 		if !input.Scan() {
 			fmt.Println("\nEnd of input, quitting.")
 			return
 		}
 
 		var row, col int
-		if _, err := fmt.Sscanf(input.Text(), "%d %d", &col, &row); err != nil || !makeMove(row, col) {
+		if _, err := fmt.Sscanf(input.Text(), "%d %d", &col, &row); err != nil || !g.makeMove(row, col) {
 			fmt.Println("Invalid move. Try again")
 			continue
 		}
 
-		printBoard()
+		g.printBoard()
 
-		winner := checkWinner()
-
-		if winner != empty {
+		if winner := g.winner(); winner != empty {
 			fmt.Printf("Player %s wins\n", winner)
-			break
+			return
 		}
 
-		if isBoardFull() {
+		if g.isBoardFull() {
 			fmt.Println("The game is a draw!")
-			break
+			return
 		}
 
-		changePlayer()
+		g.changePlayer()
 	}
 }

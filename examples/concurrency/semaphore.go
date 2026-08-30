@@ -28,6 +28,7 @@ func NewSemaphore(permissions int) *Semaphore {
 	return s
 }
 
+// Acquire takes one permit, blocking until one is available.
 func (s *Semaphore) Acquire() {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
@@ -37,14 +38,16 @@ func (s *Semaphore) Acquire() {
 	s.permissions--
 }
 
-// Release returns one permit. Calling Release without a matching Acquire would
-// conjure permits out of thin air and break the limit, so the pool never grows
-// beyond its initial size.
+// Release returns one permit and wakes one goroutine blocked in Acquire.
+//
+// Release panics when it is called more times than Acquire: an unmatched
+// Release would conjure a permit out of thin air and silently raise the limit,
+// and a programming error like that is better caught loudly.
 func (s *Semaphore) Release() {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 	if s.permissions >= s.max {
-		panic("semaphore: Release without a matching Acquire")
+		panic("concurrency: semaphore Release without a matching Acquire")
 	}
 	s.permissions++
 	// Signal is enough: we released exactly one permit, so we wake exactly one

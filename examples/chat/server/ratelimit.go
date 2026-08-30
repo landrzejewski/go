@@ -5,6 +5,7 @@ import (
 	"net"
 	"sync"
 	"time"
+
 	"training.pl/go/examples/chat/common"
 )
 
@@ -66,28 +67,34 @@ func (rl *RateLimiter) TryAddConnection(addr net.Addr) error {
 	rl.connMutex.Lock()
 	defer rl.connMutex.Unlock()
 
-	if err := rl.canConnectLocked(addr); err != nil {
+	ip, err := ipOf(addr)
+	if err != nil {
+		return err
+	}
+
+	if err := rl.canConnectLocked(ip); err != nil {
 		return err
 	}
 
 	rl.totalConnections++
-	ip, _, _ := net.SplitHostPort(addr.String())
 	rl.connectionsByIP[ip]++
 	return nil
 }
 
-// canConnectLocked wymaga trzymania connMutex.
-func (rl *RateLimiter) canConnectLocked(addr net.Addr) error {
+// ipOf extracts the host part of a network address.
+func ipOf(addr net.Addr) (string, error) {
+	ip, _, err := net.SplitHostPort(addr.String())
+	if err != nil {
+		return "", fmt.Errorf("invalid address format %q: %w", addr.String(), err)
+	}
+	return ip, nil
+}
 
+// canConnectLocked requires connMutex to be held.
+func (rl *RateLimiter) canConnectLocked(ip string) error {
 	// Check total connections
 	if rl.totalConnections >= common.MaxConnections {
 		return fmt.Errorf("server has reached maximum connection limit (%d)", common.MaxConnections)
-	}
-
-	// Extract IP from address
-	ip, _, err := net.SplitHostPort(addr.String())
-	if err != nil {
-		return fmt.Errorf("invalid address format")
 	}
 
 	// Check per-IP limit
@@ -98,8 +105,14 @@ func (rl *RateLimiter) canConnectLocked(addr net.Addr) error {
 	return nil
 }
 
-// RemoveConnection removes a connection
+// RemoveConnection removes a connection. An address that cannot be parsed was
+// never counted by TryAddConnection, so there is nothing to release for it.
 func (rl *RateLimiter) RemoveConnection(addr net.Addr) {
+	ip, err := ipOf(addr)
+	if err != nil {
+		return
+	}
+
 	rl.connMutex.Lock()
 	defer rl.connMutex.Unlock()
 
@@ -107,7 +120,6 @@ func (rl *RateLimiter) RemoveConnection(addr net.Addr) {
 		rl.totalConnections--
 	}
 
-	ip, _, _ := net.SplitHostPort(addr.String())
 	if count := rl.connectionsByIP[ip]; count > 0 {
 		if count == 1 {
 			delete(rl.connectionsByIP, ip)
@@ -153,8 +165,11 @@ func (rl *RateLimiter) CanSendMessage(nickname string) error {
 	return nil
 }
 
-// CanCreateRoom checks if a user can create a room
-func (rl *RateLimiter) CanCreateRoom(nickname string) error {
+// TryAddRoom checks the per-user room quota AND claims a slot in one operation
+// under a single lock - the same TOCTOU fix as TryAddConnection. The old
+// CanCreateRoom + AddRoom pair let two concurrent CREATE requests both pass the
+// check before either incremented the counter.
+func (rl *RateLimiter) TryAddRoom(nickname string) error {
 	rl.roomMutex.Lock()
 	defer rl.roomMutex.Unlock()
 
@@ -162,15 +177,8 @@ func (rl *RateLimiter) CanCreateRoom(nickname string) error {
 		return fmt.Errorf("room creation limit exceeded (%d rooms per user)", common.RoomsPerUser)
 	}
 
-	return nil
-}
-
-// AddRoom registers a room creation
-func (rl *RateLimiter) AddRoom(nickname string) {
-	rl.roomMutex.Lock()
-	defer rl.roomMutex.Unlock()
-
 	rl.roomsPerUser[nickname]++
+	return nil
 }
 
 // RemoveRoom removes a room from user's count
@@ -187,8 +195,9 @@ func (rl *RateLimiter) RemoveRoom(nickname string) {
 	}
 }
 
-// CanStartFileTransfer checks if a user can start a file transfer
-func (rl *RateLimiter) CanStartFileTransfer(nickname string) error {
+// TryAddFileTransfer checks the per-user transfer quota AND claims a slot in one
+// operation under a single lock (see TryAddRoom).
+func (rl *RateLimiter) TryAddFileTransfer(nickname string) error {
 	rl.transferMutex.Lock()
 	defer rl.transferMutex.Unlock()
 
@@ -196,15 +205,8 @@ func (rl *RateLimiter) CanStartFileTransfer(nickname string) error {
 		return fmt.Errorf("file transfer limit exceeded (%d concurrent transfers per user)", common.FileTransfersPerUser)
 	}
 
-	return nil
-}
-
-// AddFileTransfer registers a file transfer
-func (rl *RateLimiter) AddFileTransfer(nickname string) {
-	rl.transferMutex.Lock()
-	defer rl.transferMutex.Unlock()
-
 	rl.transfersPerUser[nickname]++
+	return nil
 }
 
 // RemoveFileTransfer removes a file transfer
@@ -221,19 +223,18 @@ func (rl *RateLimiter) RemoveFileTransfer(nickname string) {
 	}
 }
 
-// RemoveUser cleans up all rate limit data for a user
+// RemoveUser cleans up the CONNECTION-related rate limit state of a user who
+// disconnected: the message window.
+//
+// The room and file-transfer counters are deliberately left alone. The rooms a
+// user created still exist after a disconnect (they are only removed by the
+// creator or by the empty-room cleanup), and each removal path releases its own
+// slot via RemoveRoom / RemoveFileTransfer. Clearing the counters here let a user
+// bypass the quota by simply reconnecting.
 func (rl *RateLimiter) RemoveUser(nickname string) {
 	rl.rateMutex.Lock()
 	delete(rl.messageRates, nickname)
 	rl.rateMutex.Unlock()
-
-	rl.roomMutex.Lock()
-	delete(rl.roomsPerUser, nickname)
-	rl.roomMutex.Unlock()
-
-	rl.transferMutex.Lock()
-	delete(rl.transfersPerUser, nickname)
-	rl.transferMutex.Unlock()
 }
 
 // cleanup periodically cleans up old rate limit data

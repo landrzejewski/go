@@ -12,7 +12,7 @@ import (
 type CleanupManager struct {
 	server   *Server
 	ticker   *time.Ticker
-	stopChan chan bool
+	stopChan chan struct{}
 	stopOnce sync.Once
 }
 
@@ -21,7 +21,7 @@ func NewCleanupManager(server *Server) *CleanupManager {
 	return &CleanupManager{
 		server:   server,
 		ticker:   time.NewTicker(1 * time.Minute),
-		stopChan: make(chan bool),
+		stopChan: make(chan struct{}),
 	}
 }
 
@@ -69,14 +69,14 @@ func (cm *CleanupManager) cleanupFileTransfers() {
 			log.Printf("Cleaning up stale file transfer: %s", fileID)
 
 			// Notify sender about timeout
-			if sender, ok := cm.server.GetClient(ft.Sender); ok {
+			if sender, ok := cm.server.Client(ft.Sender); ok {
 				errMsg := common.NewErrorMessage("Server", ft.Sender,
 					"File transfer timed out: "+ft.Filename)
 				sender.SendMessage(errMsg)
 			}
 
 			// Notify recipient about timeout
-			if recipient, ok := cm.server.GetClient(ft.Recipient); ok {
+			if recipient, ok := cm.server.Client(ft.Recipient); ok {
 				errMsg := common.NewErrorMessage("Server", ft.Recipient,
 					"File transfer timed out: "+ft.Filename)
 				recipient.SendMessage(errMsg)
@@ -96,35 +96,15 @@ func (cm *CleanupManager) cleanupFileTransfers() {
 
 // cleanupEmptyRooms removes rooms that have stood empty longer than EmptyRoomTimeout.
 //
-// What counts is the time SINCE THE ROOM BECAME EMPTY (Room.LastEmptyAt), not
+// What counts is the time SINCE THE ROOM BECAME EMPTY (Room.lastEmptyAt), not
 // since it was created. The previous version compared CreatedAt, so a 31-minute-old
 // room vanished the moment its last member left, while a one-minute-old room
 // survived empty - even though the comment promised something entirely different.
 func (cm *CleanupManager) cleanupEmptyRooms() {
-	now := time.Now()
-	var toDelete []string
-	creators := make(map[string]string)
-
-	cm.server.roomManager.mutex.RLock()
-	for roomID, room := range cm.server.roomManager.rooms {
-		room.mutex.RLock()
-		memberCount := len(room.Members)
-		lastEmptyAt := room.LastEmptyAt
-		creator := room.Creator
-		room.mutex.RUnlock()
-
-		if memberCount == 0 && !lastEmptyAt.IsZero() && now.Sub(lastEmptyAt) > common.EmptyRoomTimeout {
-			toDelete = append(toDelete, roomID)
-			creators[roomID] = creator
-			log.Printf("Cleaning up empty room: %s (%s)", room.Name, roomID)
-		}
-	}
-	cm.server.roomManager.mutex.RUnlock()
-
-	// Delete empty rooms
-	for _, roomID := range toDelete {
+	for _, room := range cm.server.roomManager.EmptyRoomsOlderThan(common.EmptyRoomTimeout) {
+		log.Printf("Cleaning up empty room: %s (%s)", room.Name, room.ID)
 		// Release the creator's room quota - see the comment on RoomDelete.
-		cm.server.rateLimiter.RemoveRoom(creators[roomID])
-		cm.server.roomManager.RemoveRoom(roomID)
+		cm.server.rateLimiter.RemoveRoom(room.Creator)
+		cm.server.roomManager.RemoveRoom(room.ID)
 	}
 }

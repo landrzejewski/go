@@ -259,7 +259,9 @@ func m011Select() {
 
 	// --- Waiting on whichever is first ---
 	fast := make(chan string)
-	slow := make(chan string)
+	// Buffered: nobody receives from slow after select picks fast, so an unbuffered
+	// channel would block the slow goroutine forever - a textbook goroutine leak.
+	slow := make(chan string, 1)
 	go func() { time.Sleep(5 * time.Millisecond); fast <- "fast" }()
 	go func() { time.Sleep(50 * time.Millisecond); slow <- "slow" }()
 
@@ -499,8 +501,9 @@ func m011SyncPrimitives() {
       `context.Cause(ctx)`
     - `context.AfterFunc` (Go 1.21) — run a function when the context is done
     - `context.WithoutCancel` (Go 1.21) — keep the values but drop the cancellation
-- **Always `defer cancel()`.** Not calling it leaks the context's internal goroutine and timer until
-  the parent is cancelled. `go vet`'s `lostcancel` check catches the common cases.
+- **Always `defer cancel()`.** Not calling it leaves the child registered in its parent (so it is
+  never garbage-collected until the parent is cancelled) and, for `WithTimeout`/`WithDeadline`,
+  keeps the timer alive. `go vet`'s `lostcancel` check catches the common cases.
 - Cancellation **propagates down** the tree: cancelling a parent cancels every descendant. It never
   propagates up.
 - `ctx.Done()` returns a channel closed on cancellation; `ctx.Err()` says why —
@@ -688,6 +691,8 @@ func m011Patterns() {
 			break
 		}
 	}
+	// time.Sleep + runtime.NumGoroutine is only illustrative here: it is racy and slow.
+	// Real tests use testing/synctest, which waits until every goroutine is durably blocked (see §7).
 	time.Sleep(5 * time.Millisecond)
 	fmt.Printf("  cancelled a 1,000,000-item generator after %d items; goroutines now %d\n",
 		taken, runtime.NumGoroutine())

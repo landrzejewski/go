@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -43,37 +44,43 @@ type LogMetrics struct {
 	lastLog time.Time
 }
 
-// GlobalLogger is the default logger instance
-var GlobalLogger *Logger
+// globalLogger holds the default logger. It is an atomic pointer because it is
+// written by InitLogger (main goroutine) and read by every logging call, possibly
+// from other goroutines - a plain package variable would be a data race if
+// InitLogger were ever called after those goroutines started.
+var globalLogger atomic.Pointer[Logger]
+
+// Global returns the default logger, or nil when InitLogger has not succeeded.
+func Global() *Logger {
+	return globalLogger.Load()
+}
 
 // InitLogger initializes the global logger
 func InitLogger(filename string, level LogLevel) error {
-	file, err := os.OpenFile(filename, os.O_CREATE|os.O_WRONLY|os.O_APPEND, GetFileMode())
+	file, err := os.OpenFile(filename, os.O_CREATE|os.O_WRONLY|os.O_APPEND, FileMode())
 	if err != nil {
 		return err
 	}
 
-	GlobalLogger = &Logger{
+	globalLogger.Store(&Logger{
 		level:  level,
 		file:   file,
 		logger: log.New(file, "", 0),
 		metrics: &LogMetrics{
 			counts: make(map[LogLevel]int64),
 		},
-	}
+	})
 
 	return nil
 }
 
-// Close closes the log file
+// Close closes the log file. It is safe to call on a nil *Logger, so callers do
+// not need to check whether InitLogger succeeded.
 func (l *Logger) Close() error {
 	if l == nil || l.file == nil {
 		return nil
 	}
-	if l.file != nil {
-		return l.file.Close()
-	}
-	return nil
+	return l.file.Close()
 }
 
 // log writes a log message
@@ -104,70 +111,71 @@ func (l *Logger) log(level LogLevel, format string, args ...any) {
 	if level >= LogError {
 		log.Println(logLine)
 	}
-
-	// TEACHING NOTE: os.Exit does NOT run deferred calls, so a deferred Unlock in
-	// this method would never execute. Here that is harmless (the process is ending
-	// anyway), but it is a classic trap. The exit itself was moved into Fatal -
-	// see the comment there.
 }
 
 // Debug logs a debug message
 func Debug(format string, args ...any) {
-	if GlobalLogger != nil {
-		GlobalLogger.log(LogDebug, format, args...)
+	if l := Global(); l != nil {
+		l.log(LogDebug, format, args...)
 	}
 }
 
 // Info logs an info message
 func Info(format string, args ...any) {
-	if GlobalLogger != nil {
-		GlobalLogger.log(LogInfo, format, args...)
+	if l := Global(); l != nil {
+		l.log(LogInfo, format, args...)
 	}
 }
 
 // Warn logs a warning message
 func Warn(format string, args ...any) {
-	if GlobalLogger != nil {
-		GlobalLogger.log(LogWarn, format, args...)
+	if l := Global(); l != nil {
+		l.log(LogWarn, format, args...)
 	}
 }
 
 // Error logs an error message
 func Error(format string, args ...any) {
-	if GlobalLogger != nil {
-		GlobalLogger.log(LogError, format, args...)
+	if l := Global(); l != nil {
+		l.log(LogError, format, args...)
 	}
 }
 
 // Fatal logs a fatal message and exits.
 //
 // os.Exit has to be HERE and not in Logger.log: when logger initialisation failed
-// and GlobalLogger is nil, the previous version logged nothing AND did not end the
-// program - main returned normally and the process exited with status 0 despite a
-// fatal error.
+// and the global logger is nil, the previous version logged nothing AND did not
+// end the program - main returned normally and the process exited with status 0
+// despite a fatal error.
+//
+// TEACHING NOTE: os.Exit does NOT run deferred calls. That is why the exit sits
+// after Logger.log has returned (and released its mutex) rather than inside it -
+// a deferred Unlock inside log would never execute. It also means the caller's
+// deferred Close on the log file does not run; the OS closes the descriptor.
 func Fatal(format string, args ...any) {
-	if GlobalLogger != nil {
-		GlobalLogger.log(LogFatal, format, args...)
+	if l := Global(); l != nil {
+		l.log(LogFatal, format, args...)
 	} else {
 		log.Printf("[FATAL] "+format, args...)
 	}
 	os.Exit(1)
 }
 
-// GetMetrics returns logging metrics
-func GetMetrics() map[string]any {
-	if GlobalLogger == nil || GlobalLogger.metrics == nil {
+// Metrics returns logging metrics
+func Metrics() map[string]any {
+	l := Global()
+	if l == nil || l.metrics == nil {
 		return nil
 	}
 
-	GlobalLogger.metrics.mu.RLock()
-	defer GlobalLogger.metrics.mu.RUnlock()
+	l.metrics.mu.RLock()
+	defer l.metrics.mu.RUnlock()
 
 	metrics := make(map[string]any)
-	for level, count := range GlobalLogger.metrics.counts {
+	for level, count := range l.metrics.counts {
 		metrics[logLevelNames[level]] = count
 	}
-	metrics["last_log"] = GlobalLogger.metrics.lastLog
+	metrics["last_log"] = l.metrics.lastLog
 
 	return metrics
 }

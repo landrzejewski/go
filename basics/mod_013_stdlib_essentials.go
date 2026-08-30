@@ -11,6 +11,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -220,7 +221,8 @@ func m013StringsAndBytes() {
   `01/02 03:04:05PM '06 -0700`, the digits 1 through 7. Use the `time.RFC3339` constant and friends
   whenever you can.
 - `time.Now()` includes a **monotonic clock** reading, which is what makes `time.Since` immune to
-  wall-clock adjustments. Arithmetic that produces a new `Time` (like `Round` or `UTC`) strips it.
+  wall-clock adjustments. `Add`/`AddDate` keep it, but `Round`, `Truncate`, `UTC`, `Local` and
+  `In` strip it, so compare durations before converting time zones.
 - **Timers**: `time.After` in a `select` is convenient but allocates a timer per call; before Go
   1.23 it was not collected until it fired, which leaked in hot loops. `time.NewTimer` +
   `defer t.Stop()` is the careful form. `time.Tick` leaks its ticker forever — use
@@ -336,7 +338,7 @@ func m013OsAndIo() {
 	defer os.RemoveAll(dir)
 
 	// --- The one-line forms ---
-	path := dir + "/notes.txt"
+	path := filepath.Join(dir, "notes.txt")
 	content := "first line\nsecond line\nthird line\n"
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		fmt.Println("  write failed:", err)

@@ -1,32 +1,18 @@
 package common
 
-/*func Add(a, b int) int {
-	return a + b
-}*/
-
-/*func addInt(a, b int) int {
-	return a + b
-}
-
-func addFloat(a, b float64) float64 {
-	return a + b
-}*/
-
-/*func Add[T any](a, b T) T {
-	return a + b
-}*/
-
-/*func Add[T int | float64 | uint](a, b T) T {
-	return a + b
-}*/
-
+// Number is the constraint accepted by Add. It is the end of a progression
+// that started with a plain `func Add(a, b int) int`, then one copy per type
+// (addInt, addFloat), then `[T any]` - which does not compile, because `any`
+// does not support the + operator - and finally a union of the types that do.
+//
 // The ~ prefix means "any type whose UNDERLYING type is this". Without it the
-// constraint accepts only int, float64 and uint exactly, and rejects defined types
-// such as `type Celsius float64`.
-type number interface {
+// constraint accepts only int, float64 and uint exactly, and rejects defined
+// types such as `type Celsius float64`.
+type Number interface {
 	~int | ~float64 | ~uint
 }
 
-func Add[T number](a, b T) T {
+// Add returns a + b for any Number type.
+func Add[T Number](a, b T) T {
 	return a + b
 }

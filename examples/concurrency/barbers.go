@@ -7,13 +7,16 @@ import (
 	"time"
 )
 
-// Client is what travels through the waiting-room channel. There is deliberately
-// no Barber type: a barber is a goroutine, and its only state is the id already
+// client is what travels through the waiting-room channel. There is deliberately
+// no barber type: a barber is a goroutine, and its only state is the id already
 // passed to it as a parameter.
-type Client struct {
+type client struct {
 	id int
 }
 
+// BarberShop is one instance of the sleeping-barber problem: a number of
+// barbers, a waiting room with a fixed number of seats, and clients arriving at
+// roughly regular intervals while the shop is open.
 type BarberShop struct {
 	numBarbers      int
 	waitingRoomSize int
@@ -24,18 +27,19 @@ type BarberShop struct {
 	// a barber decremented it only after receiving), so clients were turned away
 	// with seats still free. Here the `select`/`default` send is both the check and
 	// the claim, so there is no window for a race (TOCTOU).
-	clientsChan       chan *Client
+	clientsChan       chan *client
 	shopOpenDuration  time.Duration
 	haircutDuration   time.Duration
 	clientArrivalRate time.Duration
 	wg                sync.WaitGroup
 }
 
+// NewBarberShop configures a shop; nothing happens until Start is called.
 func NewBarberShop(numBarbers, waitingRoomSize int, shopOpenDuration, haircutDuration, clientArrivalRate time.Duration) *BarberShop {
 	return &BarberShop{
 		numBarbers:        numBarbers,
 		waitingRoomSize:   waitingRoomSize,
-		clientsChan:       make(chan *Client, waitingRoomSize),
+		clientsChan:       make(chan *client, waitingRoomSize),
 		shopOpenDuration:  shopOpenDuration,
 		haircutDuration:   haircutDuration,
 		clientArrivalRate: clientArrivalRate,
@@ -60,11 +64,11 @@ func (bs *BarberShop) barber(id int) {
 }
 
 func (bs *BarberShop) addClient(id int) {
-	client := &Client{id: id}
+	newClient := &client{id: id}
 
 	// Check for a free seat and claim it in one indivisible operation.
 	select {
-	case bs.clientsChan <- client:
+	case bs.clientsChan <- newClient:
 		fmt.Printf("Client %d: Entered waiting room (seats occupied: %d/%d)\n",
 			id, len(bs.clientsChan), bs.waitingRoomSize)
 	default:
@@ -81,6 +85,8 @@ func (bs *BarberShop) nextArrival() time.Duration {
 	return bs.clientArrivalRate
 }
 
+// Start opens the shop, runs it for shopOpenDuration, and returns once the
+// shop has closed and every barber has gone home. It blocks the caller.
 func (bs *BarberShop) Start() {
 	fmt.Println("Barber shop is opening!")
 	fmt.Printf("Shop configuration: %d barbers, %d waiting room seats\n", bs.numBarbers, bs.waitingRoomSize)
@@ -125,12 +131,14 @@ func (bs *BarberShop) Start() {
 	fmt.Println("\nAll barbers have gone home. Shop is closed!")
 }
 
+// Barbers runs a short demo of the sleeping-barber problem: two barbers, five
+// seats, the shop open for three seconds. It finishes in a few seconds.
 func Barbers() {
 	numBarbers := 2
 	waitingRoomSize := 5
-	shopOpenDuration := 30 * time.Second
-	haircutDuration := 10 * time.Second
-	clientArrivalRate := 1 * time.Second
+	shopOpenDuration := 3 * time.Second
+	haircutDuration := 500 * time.Millisecond
+	clientArrivalRate := 100 * time.Millisecond
 
 	shop := NewBarberShop(numBarbers, waitingRoomSize, shopOpenDuration, haircutDuration, clientArrivalRate)
 	shop.Start()

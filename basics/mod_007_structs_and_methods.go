@@ -36,8 +36,8 @@ either embedding (reuse) or an interface (substitutability), and those two are k
   `int`, to `time.Time`, or to any other package's type. Define your own type from it first —
   which is exactly what module 002b's `m002bCelsius` did.
 - The base type may be **any** defined type, not just a struct: a named slice, map, function or
-  integer type can all have methods. `http.HandlerFunc` is a method on a *function* type; `sort.
-  IntSlice` is a method set on a *slice* type.
+  integer type can all have methods. `http.HandlerFunc` is a defined *function* type with a
+  `ServeHTTP` method; `sort.IntSlice` is a defined *slice* type with a method set.
 - Pointer receivers are of course fine (`func (t *T) M()`); the restriction is on the receiver's
   **base type**, which may not itself be a pointer type or an interface type. So
   `type P = *T; func (p P) M()` is rejected. Separately, the base type must be **local** to the
@@ -553,13 +553,13 @@ func m007TagsAndReflection() {
 func m007ComparabilityAndAnonymous() {
 	fmt.Println("\n--- Section 6: Comparability, Copying and Anonymous Structs ---")
 
-	type comparable1 struct {
+	type allComparable struct {
 		A int
 		B string
 		C [2]int
 	}
-	x := comparable1{1, "a", [2]int{1, 2}}
-	y := comparable1{1, "a", [2]int{1, 2}}
+	x := allComparable{1, "a", [2]int{1, 2}}
+	y := allComparable{1, "a", [2]int{1, 2}}
 	fmt.Printf("all-comparable fields: x == y is %t\n", x == y)
 
 	type withSlice struct {

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"sort"
 	"strings"
 )
@@ -62,7 +63,7 @@ type m008Named interface {
 type m008Circle struct{ R float64 }
 type m008Square struct{ Side float64 }
 
-func (c m008Circle) Area() float64 { return 3.14159265358979 * c.R * c.R }
+func (c m008Circle) Area() float64 { return math.Pi * c.R * c.R }
 func (c m008Circle) Name() string  { return "circle" }
 func (s m008Square) Area() float64 { return s.Side * s.Side }
 func (s m008Square) Name() string  { return "square" }
@@ -287,8 +288,8 @@ func m008Describe(v any) string {
 	case string:
 		return fmt.Sprintf("a string of length %d", len(t))
 	case float64, float32:
-		// Several types in one case, so t keeps the INTERFACE type `any`.
-		return fmt.Sprintf("some float, still typed as %T here", t)
+		// Several types in one case, so t keeps the INTERFACE type `any`: t * 2 would not compile.
+		return "some float; t is still any in a multi-type case, so t * 2 would not compile"
 	case m008Shape:
 		// A case can be an INTERFACE - this is the idiomatic use of a type switch.
 		return fmt.Sprintf("something with an Area(): %.2f", t.Area())
@@ -505,8 +506,14 @@ func (t *m008Temperature) UnmarshalText(b []byte) error {
 type m008UpperWriter struct{ w io.Writer }
 
 func (u m008UpperWriter) Write(p []byte) (int, error) {
-	n, err := u.w.Write([]byte(strings.ToUpper(string(p))))
-	return n, err
+	upper := []byte(strings.ToUpper(string(p)))
+	n, err := u.w.Write(upper)
+	if err != nil {
+		return n, err
+	}
+	// io.Writer contract: report how much of p was consumed, not how many bytes came out
+	// (ToUpper can change the byte length, e.g. "ß" -> "SS").
+	return len(p), nil
 }
 
 // sort.Interface on something that is not a plain slice.

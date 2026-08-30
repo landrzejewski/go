@@ -3,9 +3,9 @@ package basics
 import (
 	"errors"
 	"fmt"
+	"io"
 	"iter"
 	"os"
-	"strings"
 )
 
 /*
@@ -720,6 +720,10 @@ func m004ReadConfig(path string) (err error) {
 			err = fmt.Errorf("close config: %w", cerr)
 		}
 	}()
+	// The actual work goes here; a real version would decode the bytes.
+	if _, err = io.ReadAll(f); err != nil {
+		return fmt.Errorf("read config: %w", err)
+	}
 	return nil
 }
 
@@ -801,7 +805,7 @@ func m004PuttingItTogether() {
 	}
 
 	// The defer sketch from Section 6, exercised against a path that does not exist.
-	if err := m004ReadConfig(strings.Repeat("/nonexistent", 1)); err != nil {
+	if err := m004ReadConfig("/nonexistent"); err != nil {
 		fmt.Printf("  m004ReadConfig on a missing file: %v\n", err)
 	}
 }

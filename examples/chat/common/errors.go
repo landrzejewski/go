@@ -5,17 +5,19 @@ import (
 	"fmt"
 )
 
-// ErrorType represents the type of error
+// ErrorType classifies a ChatError. The constants are named Kind* rather than
+// Err*: by convention an Err-prefixed identifier is an error VALUE (a sentinel
+// to compare with errors.Is), and these are plain strings.
 type ErrorType string
 
 const (
-	ErrValidation   ErrorType = "VALIDATION"
-	ErrRateLimit    ErrorType = "RATE_LIMIT"
-	ErrNotFound     ErrorType = "NOT_FOUND"
-	ErrUnauthorized ErrorType = "UNAUTHORIZED"
-	ErrInternal     ErrorType = "INTERNAL"
-	ErrTimeout      ErrorType = "TIMEOUT"
-	ErrDuplicate    ErrorType = "DUPLICATE"
+	KindValidation   ErrorType = "VALIDATION"
+	KindRateLimit    ErrorType = "RATE_LIMIT"
+	KindNotFound     ErrorType = "NOT_FOUND"
+	KindUnauthorized ErrorType = "UNAUTHORIZED"
+	KindInternal     ErrorType = "INTERNAL"
+	KindTimeout      ErrorType = "TIMEOUT"
+	KindDuplicate    ErrorType = "DUPLICATE"
 )
 
 // ChatError represents a custom error with context

@@ -3,6 +3,7 @@ package basics
 import (
 	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"net/http"
 	"net/http/httptest"
@@ -120,29 +121,27 @@ func TestTableDrivenWithErrors(t *testing.T) {
 		name    string
 		in      string
 		want    map[string]string
-		wantErr error // nil means "expect success"
+		wantErr bool  // expect some error
+		errIs   error // if non-nil, the error must match this sentinel (errors.Is)
 	}{
-		{"single", "a=1", map[string]string{"a": "1"}, nil},
-		{"several", "a=1, b=2", map[string]string{"a": "1", "b": "2"}, nil},
-		{"spaces trimmed", " a = 1 ", map[string]string{"a": "1"}, nil},
-		{"empty", "  ", nil, m014ErrEmpty},
-		{"no equals", "a=1,oops", nil, nil}, // wantErr nil but non-nil error: checked below
+		{"single", "a=1", map[string]string{"a": "1"}, false, nil},
+		{"several", "a=1, b=2", map[string]string{"a": "1", "b": "2"}, false, nil},
+		{"spaces trimmed", " a = 1 ", map[string]string{"a": "1"}, false, nil},
+		{"empty", "  ", nil, true, m014ErrEmpty},
+		{"no equals", "a=1,oops", nil, true, nil}, // any error is fine here
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got, err := m014ParseKV(tt.in)
 
-			switch {
-			case tt.wantErr != nil:
-				// Compare errors with errors.Is, never with == or by message (module 009).
-				if !errors.Is(err, tt.wantErr) {
-					t.Fatalf("m014ParseKV(%q) error = %v, want %v", tt.in, err, tt.wantErr)
-				}
-				return
-			case tt.want == nil:
+			if tt.wantErr {
 				if err == nil {
 					t.Fatalf("m014ParseKV(%q) succeeded, want an error", tt.in)
+				}
+				// Compare errors with errors.Is, never with == or by message (module 009).
+				if tt.errIs != nil && !errors.Is(err, tt.errIs) {
+					t.Fatalf("m014ParseKV(%q) error = %v, want %v", tt.in, err, tt.errIs)
 				}
 				return
 			}
@@ -396,8 +395,10 @@ func TestSynctestSleepAdvancesTheClock(t *testing.T) {
 			t.Errorf("after Sleep(2.5s), %d goroutines had finished, want 2", afterSleep)
 		}
 
-		// The bubble must be fully drained, or synctest.Test panics - which is how a goroutine
-		// leak becomes a test failure.
+		// synctest.Test waits for every bubbled goroutine to exit before returning; a goroutine
+		// that can never finish deadlocks the bubble and FAILS the test - which is how a leak
+		// becomes a test failure. This Sleep is illustrative, not required: Test would advance
+		// the clock and let the last sleeper finish on its own.
 		synctest.Sleep(time.Second)
 	})
 }
@@ -423,7 +424,8 @@ func TestSynctestTimeout(t *testing.T) {
 			}
 		}
 
-		// The bubble must be drained: let the sleeping goroutine finish, or synctest.Test panics.
+		// synctest.Test waits for the sleeping goroutine to finish (advancing the fake clock as
+		// needed); a goroutine blocked forever would fail the test. This Sleep is illustrative.
 		synctest.Sleep(10 * time.Minute) // Go 1.27: advance the clock and wait
 		<-slow
 	})
@@ -509,6 +511,7 @@ func TestHTTPTestServer(t *testing.T) {
 		t.Fatalf("GET: %v", err)
 	}
 	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body) // drain so the keep-alive connection can be reused
 	m014AssertEqual(t, resp.StatusCode, http.StatusOK, "status")
 
 	// ResponseRecorder tests a handler with no server at all.

@@ -6,12 +6,12 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
+
 	"training.pl/go/examples/chat/common"
 )
-
-var logFile *os.File
 
 func main() {
 	// Parse command line arguments
@@ -26,71 +26,73 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Set up logging to file. This used to live in init(); doing I/O there runs
+	// before flag parsing and before main can decide anything, and the file was
+	// not closed on every exit path.
+	logFile, err := os.OpenFile("client.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, common.FileMode())
+	if err != nil {
+		log.Printf("Failed to open log file: %v", err)
+	} else {
+		log.SetOutput(logFile)
+	}
+	closeLog := func() {
+		if logFile != nil {
+			logFile.Close()
+		}
+	}
+
 	// Create connection
 	conn := NewConnection(*nickname)
 
 	// Create file transfer manager
 	ft := NewFileTransfer(conn)
 
-	// Create UI
-	ui := NewUI(conn, ft)
+	// shutdown is THE single exit routine, shared by /quit, Ctrl-C and end of
+	// input: tell the server we are leaving, tear the connection down, close the
+	// log and exit. sync.Once guards against Ctrl-C arriving during /quit.
+	var once sync.Once
+	shutdown := func() {
+		once.Do(func() {
+			fmt.Println("\nShutting down...")
+			if conn.IsConnected() {
+				if err := conn.SendDisconnect("Client shutting down"); err != nil {
+					fmt.Printf("could not send the disconnect message: %v\n", err)
+				} else {
+					// The message is only queued; give writePump a moment to put
+					// it on the wire before the socket is closed.
+					time.Sleep(100 * time.Millisecond)
+				}
+			}
+			conn.Disconnect()
+			closeLog()
+			fmt.Println("Goodbye!")
+			os.Exit(0)
+		})
+	}
 
-	// Handle graceful shutdown
+	// Create UI
+	ui := NewUI(conn, ft, shutdown)
+
+	// Handle graceful shutdown on Ctrl-C / SIGTERM
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
-
 	go func() {
 		<-sigChan
-		fmt.Println("\nShutting down...")
-
-		// Send disconnect message if connected
-		if conn.IsConnected() {
-			disconnectMsg := &common.Message{
-				Type:    common.TypeDisconnect,
-				Sender:  *nickname,
-				Content: "Client shutting down",
-			}
-			// Non-blocking send: if writePump has already finished and the buffer
-			// is full, a bare `conn.sendChan <- msg` would hang Ctrl-C.
-			select {
-			case conn.sendChan <- disconnectMsg:
-				// Give message time to send
-				time.Sleep(100 * time.Millisecond)
-			case <-time.After(time.Second):
-				fmt.Println("could not send the disconnect message")
-			}
-		}
-
-		conn.Disconnect()
-
-		// Close log file
-		if logFile != nil {
-			logFile.Close()
-		}
-
-		fmt.Println("Goodbye!")
-		os.Exit(0)
+		shutdown()
 	}()
 
 	// Connect to server with retry
-	go conn.ConnectWithRetry(*serverAddr)
+	go conn.ConnectWithBackoff(*serverAddr)
 
 	// Wait for connection
 	fmt.Printf("Connecting to %s...\n", *serverAddr)
-	conn.WaitForConnection()
-
-	// Start UI
-	ui.Start()
-}
-
-// Initialize logging
-func init() {
-	// Set up logging to file
-	var err error
-	logFile, err = os.OpenFile("client.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, common.GetFileMode())
-	if err == nil {
-		log.SetOutput(logFile)
-	} else {
-		log.Printf("Failed to open log file: %v", err)
+	if err := conn.WaitForConnection(); err != nil {
+		fmt.Printf("Error: %v\n", err)
+		closeLog()
+		os.Exit(1)
 	}
+
+	// Start UI; it returns when stdin is closed, which is treated like /quit.
+	ui.Start()
+	shutdown()
 }

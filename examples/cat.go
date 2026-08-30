@@ -8,11 +8,22 @@ import (
 	"os"
 )
 
+// Cat prints the contents of the files named on the command line, optionally
+// numbering the lines (-n) or only the non-empty lines (-nb).
+//
+// An unreadable file is reported and skipped; the remaining files are still
+// printed and the process exits with status 1 at the end.
 func Cat() {
-	numberLines := flag.Bool("n", false, "Number lines")
-	numberNonEmptyLines := flag.Bool("nb", false, "Number non empty lines")
-	flag.Parse()
-	paths := flag.Args()
+	// A private FlagSet instead of flag.CommandLine: every demo in this package
+	// parses its own flags, and registering "-n" twice on the global set panics
+	// with "flag redefined".
+	flags := flag.NewFlagSet("cat", flag.ExitOnError)
+	numberLines := flags.Bool("n", false, "Number lines")
+	numberNonEmptyLines := flags.Bool("nb", false, "Number non-empty lines")
+	if err := flags.Parse(os.Args[1:]); err != nil {
+		os.Exit(2)
+	}
+	paths := flags.Args()
 
 	if len(paths) == 0 || (*numberLines && *numberNonEmptyLines) {
 		// A usage error goes to stderr and exits non-zero - otherwise a script
@@ -25,18 +36,24 @@ func Cat() {
 	// just like cat(1).
 	printerFn := printerFactory(*numberLines, *numberNonEmptyLines)
 
+	failed := false
 	for _, path := range paths {
 		fmt.Printf("File: %s\n", path)
 		if err := cat(path, printerFn); err != nil {
-			log.Fatalf("error reading %q: %v", path, err)
+			log.Printf("error reading %q: %v", path, err)
+			failed = true
 		}
+	}
+	if failed {
+		os.Exit(1)
 	}
 }
 
-// printer receives just the line - the counter is internal state of the particular
-// implementation. Previously the counter lived in cat and advanced for EVERY line,
-// with -nb merely hiding the number on empty lines. For the input "a\n\nb\n" that
-// produced 1, (empty), 3 instead of the correct 1, (empty), 2.
+// printer receives just the line - the counter is internal state of the
+// particular implementation. Previously the counter lived in cat and advanced
+// for EVERY line, with -nb merely hiding the number on empty lines. For the
+// input "a\n\nb\n" that produced 1, (empty), 3 instead of the correct
+// 1, (empty), 2.
 type printer func(string)
 
 func printerFactory(numberLines, numberNonEmptyLines bool) printer {
@@ -68,8 +85,7 @@ func cat(path string, printerFn printer) error {
 	if err != nil {
 		return err
 	}
-	// log.Fatal inside a defer calls os.Exit and skips every remaining defer, so a
-	// close error is only logged.
+	// A close error on a file opened for reading is only worth logging.
 	defer func() {
 		if err := file.Close(); err != nil {
 			log.Printf("error closing %q: %v", path, err)

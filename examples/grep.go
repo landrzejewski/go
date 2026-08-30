@@ -10,6 +10,9 @@ import (
 	"regexp"
 )
 
+// Grep prints every line under the given path that matches the regular
+// expression: grep pattern path. Files and directories that cannot be read are
+// reported and skipped.
 func Grep() {
 	if len(os.Args) < 3 {
 		log.Fatalf("Usage: grep pattern path")
@@ -22,9 +25,9 @@ func Grep() {
 
 	path := os.Args[2]
 
-	// We pass a *regexp.Regexp, not a copy of the value: copying a Regexp is
-	// discouraged (it invalidates the internal match-automaton cache - which is
-	// why Regexp.Copy was deprecated in Go 1.12).
+	// One *regexp.Regexp is shared by every call of the walk function: a Regexp
+	// is safe for concurrent use by multiple goroutines, so there is no reason to
+	// copy it (Regexp.Copy was deprecated in Go 1.12 for exactly that reason).
 	//
 	// WalkDir rather than Walk: recommended since Go 1.16, because the callback
 	// receives an fs.DirEntry instead of an fs.FileInfo and so avoids a stat(2)
@@ -68,11 +71,13 @@ func search(pattern *regexp.Regexp) fs.WalkDirFunc {
 				fmt.Printf("%s (line: %d): %s\n", path, lineNumber, line)
 			}
 		}
-		// This used to be `return err` - but err is the WalkDirFunc parameter,
-		// shadowed by os.Open above and always nil at this point, so the function
-		// only pretended to propagate errors. The real error comes from the
-		// scanner (I/O, or a line longer than 64 KiB - easy to hit in a binary
-		// file).
-		return scanner.Err()
+		// A scanner error (I/O, or a line longer than 64 KiB - easy to hit in a
+		// binary file) concerns only this file. Returning it from a WalkDirFunc
+		// would abort the whole walk, so - consistently with the other errors
+		// above - it is logged and the walk continues.
+		if err := scanner.Err(); err != nil {
+			log.Printf("error reading %q: %v", path, err)
+		}
+		return nil
 	}
 }

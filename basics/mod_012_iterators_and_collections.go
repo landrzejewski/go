@@ -314,7 +314,9 @@ func m012SlicesPackage() {
 		sorted, slices.Min(s), slices.Max(s), slices.IsSorted(sorted))
 
 	// SortFunc takes a three-way comparison, not a less function.
-	words := []string{"banana", "fig", "apple", "kiwi"}
+	// "pear" and "kiwi" share a length, so the single-key sort keeps them in input order
+	// (pear, kiwi) while the multi-key sort below flips them (kiwi, pear).
+	words := []string{"banana", "fig", "apple", "pear", "kiwi"}
 	byLength := slices.Clone(words)
 	slices.SortFunc(byLength, func(a, b string) int { return cmp.Compare(len(a), len(b)) })
 	fmt.Printf("  SortFunc by length: %v\n", byLength)

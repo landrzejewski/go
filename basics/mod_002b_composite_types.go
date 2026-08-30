@@ -127,8 +127,9 @@ func m002bMutateArray(a [3]int) { a[0] = -1 } // operates on a copy
   length, up to the capacity.
 - `nil` slice vs **empty** slice: `var s []int` is nil, `s := []int{}` is not. Both have `len 0`,
   both support `range` and `append`, and `len(s) == 0` is the right emptiness test for either. They
-  differ in exactly two visible places: `s == nil`, and `encoding/json`, which marshals a nil slice
-  as `null` and an empty one as `[]`. **Prefer the nil slice** as your zero value.
+  differ only where code looks at nil-ness explicitly: `s == nil`, `reflect.DeepEqual` (which treats
+  them as unequal), and `encoding/json`, which marshals a nil slice as `null` and an empty one as
+  `[]`. **Prefer the nil slice** as your zero value.
 */
 
 func m002bSliceHeader() {
@@ -308,9 +309,11 @@ func m002bAppendCopyClear() {
   order. To iterate in order, collect the keys and sort them, or use `slices.Sorted(maps.Keys(m))`.
 - A map entry is **not addressable**: `&m[k]` does not compile, and neither does `m[k].Field = v`
   when the value is a struct. Store a *pointer* to the struct, or read-modify-write the whole value.
-- Maps are **not safe for concurrent use**. Concurrent read/write is detected by the runtime and
-  aborts the program with `fatal error: concurrent map writes` — which is not a recoverable panic.
-  Use a mutex, or `sync.Map` for its specific append-mostly workload (module 011).
+- Maps are **not safe for concurrent use**. Concurrent access is detected by the runtime and
+  aborts the program with `fatal error: concurrent map read and map write` (or `concurrent map
+  writes` for two writers) — which is not a recoverable panic. Use a mutex, or `sync.Map` for its
+  specific workloads: entries written once and read many times, or goroutines that each touch a
+  disjoint set of keys (module 011).
 - Since Go 1.24 maps use a **Swiss-table** implementation: faster lookups and less memory. No API
   changed; only the constant factors did.
 */
@@ -578,7 +581,7 @@ func m002bDefinedTypesAndAliases() {
 	fmt.Printf("m002bTemperature and float64 are one type: %v %v\n", temp, plain)
 
 	// An alias cannot carry methods:
-	//	func (t m002bText) Shout() string { return t } // ERROR: cannot define new methods on non-local type m002bText
+	//	func (t m002bText) Shout() string { return t } // ERROR: cannot define new methods on non-local type string
 
 	// --- Go 1.24: generic aliases ---
 	seen := m002bSet[string]{"a": {}, "b": {}}

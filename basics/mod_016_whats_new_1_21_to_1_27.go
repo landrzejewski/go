@@ -164,10 +164,11 @@ func m016Go122() {
 
 	// math/rand/v2.
 	r := rand.New(rand.NewPCG(42, 1024)) // deterministic, for reproducible output here
-	// rand.N here is the PACKAGE-level generic function, which is what 1.22 shipped.
-	// The (*Rand).N method is a Go 1.27 addition - see Section 7.
+	// 1.22 shipped rand.N as a PACKAGE-level generic function (on the global, unseeded source).
+	// r.N is the (*Rand).N generic METHOD added in Go 1.27 (see Section 7); using it keeps
+	// every number below reproducible.
 	fmt.Printf("  math/rand/v2: IntN(100)=%d Float64()=%.4f N[int64](1000)=%d\n",
-		r.IntN(100), r.Float64(), rand.N(int64(1000)))
+		r.IntN(100), r.Float64(), r.N(int64(1000)))
 	fmt.Println("    v2 removed Seed and Read, uses PCG/ChaCha8, and has no global lock")
 
 	// slices.Concat and cmp.Or.
@@ -278,8 +279,8 @@ func m016Go123() {
 
 ### Runtime and toolchain
 
-  - **Swiss-table maps**: a new map implementation, typically 30% faster for lookups and using less
-    memory. **No API changed** — only the constant factors.
+  - **Swiss-table maps**: a new map implementation, up to ~30% faster on some map operations (a
+    few percent overall) and using less memory. **No API changed** — only the constant factors.
   - **The `tool` directive in `go.mod`**: `go get -tool`, then `go tool <name>`. It replaces the
     `tools.go` build-tag hack, so everyone gets the same version of every code generator and linter.
   - `go test -json` improvements, and cgo build-time gains.
@@ -321,7 +322,7 @@ func m016Go124() {
 	fmt.Println("  json:\",omitzero\" finally omits a zero struct or a zero time.Time")
 
 	// Swiss tables and the tool directive.
-	fmt.Println("  Swiss-table maps: ~30% faster lookups, less memory, no API change")
+	fmt.Println("  Swiss-table maps: up to ~30% faster on some operations, less memory, no API change")
 	fmt.Println("  the `tool` directive in go.mod replaces the tools.go build-tag hack")
 
 	// strings iterators added in 1.24.
@@ -515,7 +516,7 @@ The current release, and the one with the largest language change since generics
     had already covered assigning to a func-typed variable and passing as an argument; 1.27
     generalises those into one assignability rule.
   - **A struct-literal key may be any valid field selector**, including a **promoted** field from an
-    embedded struct: `Line{name: "diagonal"}` where `name` comes from an embedded `Object`
+    embedded struct: `Line{Name: "diagonal"}` where `Name` comes from an embedded `Object`
     (module 002b, Section 12).
 
 ### Library
@@ -561,7 +562,7 @@ func m016Go127() {
 	fmt.Println("    still not allowed: a generic method cannot satisfy an interface")
 
 	// --- Inference in all assignment contexts ---
-	table := map[string]func(int, int) int{"min": m010Min[int]}
+	table := map[string]func(int, int) int{"min": m010Min}         // inferred, no [int]
 	inferred := map[string]func(int) int{"identity": m010Identity} // inferred, no [int]
 	fmt.Printf("  inference into a map value with no instantiation: %d / %d\n",
 		table["min"](4, 9), inferred["identity"](5))

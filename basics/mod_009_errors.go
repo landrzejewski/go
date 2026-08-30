@@ -3,6 +3,7 @@ package basics
 import (
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"strconv"
@@ -478,8 +479,8 @@ func m009InPractice() {
 	// A layered operation, showing the message reading as a path.
 	if err := m009ProcessOrder("ORD-1", "abc"); err != nil {
 		fmt.Printf("  %v\n", err)
-		fmt.Printf("    caller can still branch: Is(m009ErrNotFound)=%t\n",
-			errors.Is(err, m009ErrNotFound))
+		fmt.Printf("    caller can still branch: Is(strconv.ErrSyntax)=%t\n",
+			errors.Is(err, strconv.ErrSyntax))
 	}
 
 	// Partial success: both a result and an error.
@@ -518,24 +519,22 @@ func m009ParseAll(inputs []string) ([]int, error) {
 	return out, nil
 }
 
-// m009WriteReport shows a deferred Close whose error is not discarded.
+// m009FailingCloser is a WriteCloser whose Close always fails - standing in for a buffered file
+// whose final flush hits a full disk, or a network connection that drops during shutdown.
+type m009FailingCloser struct{ io.Writer }
+
+func (m009FailingCloser) Close() error { return errors.New("flush: disk full") }
+
+// m009WriteReport shows a deferred Close whose error is not discarded. The writes succeed; the
+// failure only appears at Close, which is exactly the error a bare `defer f.Close()` would lose.
 func m009WriteReport() (err error) {
-	f, err := os.CreateTemp("", "m009-report-*")
-	if err != nil {
-		return fmt.Errorf("create report: %w", err)
-	}
-	name := f.Name()
+	var f io.WriteCloser = m009FailingCloser{io.Discard}
 	defer func() {
 		if cerr := f.Close(); cerr != nil && err == nil {
 			err = fmt.Errorf("close report: %w", cerr)
 		}
-		_ = os.Remove(name)
-		// Closing twice fails, which is how this demo produces a visible cleanup error.
-		if cerr := f.Close(); cerr != nil && err == nil {
-			err = fmt.Errorf("close report (second attempt, to show the mechanism): %w", cerr)
-		}
 	}()
-	if _, err := f.WriteString("report body\n"); err != nil {
+	if _, err := io.WriteString(f, "report body\n"); err != nil {
 		return fmt.Errorf("write report: %w", err)
 	}
 	return nil

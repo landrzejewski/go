@@ -107,7 +107,8 @@ func m002aOverview() {
   left operand: `-7 / 2 == -3` and `-7 % 3 == -1`. Go has no built-in Euclidean modulus, so the
   usual idiom for a non-negative result is `((a % n) + n) % n`.
 - Limits live in `math` as **untyped constants**: `math.MaxInt`, `math.MinInt64`, `math.MaxUint8`
-  and friends. Because they are untyped, `math.MaxUint64` cannot be assigned to an `int` — but it
+  and friends. Being untyped, each one takes whatever type the context demands — as long as the
+  value fits: `math.MaxUint64` cannot be assigned to an `int` because it overflows `int`, but it
   fits a `uint64` perfectly.
 - Literals may be written decimal, binary `0b1010`, octal `0o755` (or the legacy `0755`), hex
   `0xFF`, and may carry `_` separators for readability: `1_000_000`.
@@ -140,7 +141,7 @@ func m002aIntegerTypes() {
 	// There is no checked_add; detect overflow yourself.
 	x, y := math.MaxInt64, 1
 	if x > math.MaxInt64-y {
-		fmt.Println("overflow detected before it happens (the only way to do it in Go)")
+		fmt.Println("overflow detected before it happens (the usual way to do it in Go)")
 	}
 
 	// --- Division and remainder ---
@@ -436,7 +437,7 @@ func m002aBytesAndRunes() {
 
 	// --- Conversions ---
 	runes := []rune(s)
-	fmt.Printf("[]rune gives random access by character: runes[1]=%q, len=%d\n", runes[1], len(runes))
+	fmt.Printf("[]rune gives random access by code point: runes[1]=%q, len=%d\n", runes[1], len(runes))
 	fmt.Printf("reversed by runes: %q\n", m002aReverse(s))
 
 	// string(int) is a RUNE conversion, not a number-to-text conversion.
@@ -504,8 +505,7 @@ func m002aConversionsAndStrconv() {
 	if _, err := strconv.Atoi("12x"); err != nil {
 		fmt.Printf("strconv.Atoi(\"12x\") failed: %v\n", err)
 		// The error is typed and carries the reason.
-		var numErr *strconv.NumError
-		if ok := m002aAsNumError(err, &numErr); ok {
+		if numErr, ok := m002aAsNumError(err); ok {
 			fmt.Printf("  typed error: func=%s input=%q reason=%v\n",
 				numErr.Func, numErr.Num, numErr.Err)
 		}
@@ -538,12 +538,9 @@ func m002aConversionsAndStrconv() {
 }
 
 // m002aAsNumError is a tiny helper standing in for errors.As, which module 009 covers properly.
-func m002aAsNumError(err error, target **strconv.NumError) bool {
-	if ne, ok := err.(*strconv.NumError); ok {
-		*target = ne
-		return true
-	}
-	return false
+func m002aAsNumError(err error) (*strconv.NumError, bool) {
+	ne, ok := err.(*strconv.NumError)
+	return ne, ok
 }
 
 // Run002a runs every section of module 002a in order.
